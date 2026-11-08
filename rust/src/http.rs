@@ -58,7 +58,7 @@ pub fn validate_base(url: &Url) -> Result<(), HttpError> {
 }
 
 /// Errors deliberately retain no reqwest source, URL, headers, or response body.
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum HttpError {
     #[error("invalid HTTP endpoint; use an HTTP(S) base without credentials, query, or fragment")]
     InvalidEndpoint,

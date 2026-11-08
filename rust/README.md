@@ -69,8 +69,12 @@ cargo run --locked -- --data ./data --debug start
 cargo run --locked -- --data ./data --debug --http-tracing start
 ```
 
-Logs go to stderr. HTTP tracing requires debug logging for visibility and uses
-redacted transport records. Review logs before sharing them.
+Logs go to stderr at info level by default: service startup/shutdown, device
+connections/reconnects, and accepted SponsorBlock seeks. Device numbers follow
+configuration order; these messages omit screen IDs, video IDs, keys and URLs.
+`--debug` enables additional diagnostics. HTTP tracing also requires
+`--http-tracing` and uses redacted transport records. Review logs before sharing
+them. With Docker, use `docker compose logs -f isponsorblocktv-rust`.
 
 ## Docker
 
@@ -103,7 +107,9 @@ discovery may require deployment-specific multicast/network configuration.
 
 [Dockerfile.artifacts](Dockerfile.artifacts) is a separate packaging path: it uses
 this directory as its build context and expects prebuilt binaries, a CA bundle,
-and a license under `dist/`. It does not compile the application.
+and a license under `dist/`, plus `THIRD_PARTY_NOTICES.md` in this directory.
+It does not compile the application. Both images include the project license and
+incorporated-code notices under `/app/`.
 
 ## Development
 
@@ -131,6 +137,24 @@ These tests do not certify physical devices, live API behavior, LAN multicast,
 or real terminal lifecycle behavior. Verify those separately when changing the
 corresponding integration. There is no configured numerical coverage threshold.
 
+### Dependency security
+
+Run `cargo audit --file Cargo.lock` with an up-to-date RustSec database (install
+the tool with `cargo install cargo-audit --locked`). The November 2026 audit
+prompted upgrades to quick-xml 0.41, lru 0.18 and Ratatui 0.30: these remove the
+XML denial-of-service advisories RUSTSEC-2026-0194/0195, lru soundness advisories,
+and the transitive unmaintained paste dependency.
+
+**Known native-library exposure:** the Linux vendored TLS chain still resolves
+`openssl-src 300.6.1+3.6.3`. OpenSSL 3.6.3 is affected by
+[CVE-2026-35189](https://openssl-library.org/news/secadv/20260929.txt),
+a certificate-processing memory-exhaustion issue fixed in OpenSSL 3.6.5.
+At the audit date, no patched 3.x `openssl-src` release was available through the
+current `openssl-sys` dependency constraint. A clean RustSec audit does not clear
+this exposure or certify native libraries. Recheck upstream OpenSSL advisories
+and vendored source versions before deployment; rebuilding the unchanged lockfile
+does not fix it. The audit is not a full container or host-library CVE inventory.
+
 ### Architecture
 
 `main.rs` handles arguments, logging, and signals; `lib.rs` composes injected
@@ -138,9 +162,11 @@ configuration, endpoints, prompt I/O, and cancellation. Configuration has separa
 lossless editable and validated runtime representations.
 
 At runtime, one actor owns each device's playback/protocol state. Lounge events
-update playback snapshots; shared API services fetch/cache segments; a pure
-scheduler computes skip timing; serialized Lounge commands control the device.
-The TUI uses an event/reducer/effect model with stale-result guards.
+update playback snapshots; shared API services fetch/cache segments and coalesce
+concurrent requests for the same video. A pure scheduler computes skip timing;
+serialized Lounge commands control the device. The TUI uses an event/reducer/effect
+model with stale-result guards, reusing API clients and cached channel searches
+until API-key or proxy settings change.
 
 | Location | Responsibility |
 | --- | --- |
@@ -189,7 +215,8 @@ release with a `v`-prefixed tag is published. It verifies that the tag is exactl
 `v` plus the version in `rust/Cargo.toml`, then requires Rust CI before publishing:
 
 - Archives named `iSponsorBlockTV-rust-<version>-<target>.tar.gz` (Unix) or `.zip`
-  (Windows), containing the executable and license, plus `SHA256SUMS-rust.txt`.
+  (Windows), containing the executable, license and `THIRD_PARTY_NOTICES.md`,
+  plus `SHA256SUMS-rust.txt`.
 - Linux musl targets: x86_64, aarch64, i686, ARMv7 and ARMv6; macOS targets:
   aarch64 and x86_64; Windows target: x86_64 MSVC. Cross-built targets are not
   runtime certification for those devices.

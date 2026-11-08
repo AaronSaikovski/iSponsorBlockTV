@@ -4,6 +4,7 @@ ARG TARGETVARIANT
 COPY dist/${TARGETARCH}/${TARGETVARIANT}/iSponsorBlockTV /app/iSponsorBlockTV
 COPY dist/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY dist/LICENSE.md /app/LICENSE.md
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     iSPBTV_data_dir=/app/data \
     iSPBTV_docker=True \

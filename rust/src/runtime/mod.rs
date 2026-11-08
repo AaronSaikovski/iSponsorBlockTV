@@ -12,6 +12,7 @@ use crate::{
 use std::{sync::Arc, time::Duration};
 use tokio::{task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -57,9 +58,17 @@ pub async fn run(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    for (device, transport) in config.devices.iter().cloned().zip(transports) {
+    tracing::info!(
+        devices = config.devices.len(),
+        "Starting device-control service"
+    );
+    for (index, (device, transport)) in config.devices.iter().cloned().zip(transports).enumerate() {
         let actor = device::DeviceActor::new(device, config.clone(), api.clone(), transport);
-        actors.spawn(actor.run(actors_shutdown.clone()));
+        actors.spawn(
+            actor
+                .run(actors_shutdown.clone())
+                .instrument(tracing::info_span!("device", number = index + 1)),
+        );
     }
     let mut failed = false;
     tokio::select! {
@@ -67,6 +76,7 @@ pub async fn run(
         _ = shutdown.cancelled() => {},
         _ = actors.join_next() => { failed = true; },
     }
+    tracing::info!("Stopping device-control service");
     let deadline = Instant::now() + Duration::from_secs(3);
     actors_shutdown.cancel();
     if tokio::time::timeout_at(deadline, async {
@@ -79,12 +89,15 @@ pub async fn run(
     .await
     .is_err()
     {
+        tracing::warn!("Device shutdown deadline exceeded; cancelling remaining tasks");
         actors.abort_all();
         while actors.join_next().await.is_some() {}
     }
     if failed {
+        tracing::error!("Device-control service stopped after a device task failure");
         Err(RuntimeError::DeviceTask)
     } else {
+        tracing::info!("Device-control service stopped");
         Ok(())
     }
 }

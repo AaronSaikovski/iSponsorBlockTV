@@ -634,3 +634,121 @@ async fn malformed_application_xml_cannot_trigger_launch() {
         fixture.finish().await;
     }
 }
+
+#[tokio::test]
+async fn oversized_dial_identities_are_rejected_without_launch_and_scan_continues() {
+    use isponsorblocktv::discovery::MAX_SCREEN_ID_BYTES;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for screen in [
+        "x".repeat(MAX_SCREEN_ID_BYTES + 1),
+        format!("<![CDATA[{}]]>", "x".repeat(MAX_SCREEN_ID_BYTES + 1)),
+        "&#x1f600;".repeat(MAX_SCREEN_ID_BYTES / 4 + 1),
+        format!("{}<![CDATA[x]]>", "x".repeat(MAX_SCREEN_ID_BYTES)),
+    ] {
+        let requests = AtomicUsize::new(0);
+        let mut fixture = Fixture::start(Arc::new(move |request, base| {
+            if request.method == "GET" && request.target == "/apps/YouTube" {
+                let screen = if requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    screen.clone()
+                } else {
+                    "x".repeat(MAX_SCREEN_ID_BYTES)
+                };
+                return reply(200, &format!(
+                    "<service><additionalData><screenId>{screen}</screenId></additionalData></service>"
+                ));
+            }
+            standard(request, base, false)
+        })).await;
+        let mut session = fixture.discovery().start(DiscoveryMode::ActiveOnce);
+        let peer = fixture.search().await;
+        fixture.announce(peer, "desc-overlong", "overlong").await;
+        let event = timeout(Duration::from_secs(3), session.next())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, Some(DiscoveryEvent::BackendWarning { backend: "DIAL", message })
+            if message.contains("retention limit"))
+        );
+        fixture.announce(peer, "desc-valid", "valid").await;
+        let event = timeout(Duration::from_secs(3), session.next())
+            .await
+            .unwrap();
+        let Some(DiscoveryEvent::Device(device)) = event else {
+            panic!("expected bounded identity after rejection, got {event:?}");
+        };
+        assert_eq!(device.screen_id, "x".repeat(MAX_SCREEN_ID_BYTES));
+        session.stop().await;
+        while let Ok(request) = fixture.requests.try_recv() {
+            assert_eq!(request.method, "GET");
+        }
+        fixture.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn oversized_paired_dial_identity_is_not_emitted_or_retried() {
+    use isponsorblocktv::discovery::MAX_SCREEN_ID_BYTES;
+    let mut fixture = Fixture::start(Arc::new(|request, base| {
+        if request.target == "/pairing/get_screen" {
+            return reply(
+                200,
+                &serde_json::json!({
+                    "screen": {"screenId": "x".repeat(MAX_SCREEN_ID_BYTES + 1), "name": "TV"}
+                })
+                .to_string(),
+            );
+        }
+        standard(request, base, false)
+    }))
+    .await;
+    let mut session = fixture.discovery().start(DiscoveryMode::ActiveOnce);
+    let peer = fixture.search().await;
+    fixture.announce(peer, "desc", "paired").await;
+    let event = timeout(Duration::from_secs(3), session.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(event, Some(DiscoveryEvent::BackendWarning { backend: "DIAL", message })
+        if message.contains("256 bytes"))
+    );
+    session.stop().await;
+    let mut pairings = 0;
+    while let Ok(request) = fixture.requests.try_recv() {
+        pairings += usize::from(request.target == "/pairing/get_screen");
+    }
+    assert_eq!(pairings, 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn oversized_device_name_ends_session_before_emitting_device() {
+    use isponsorblocktv::discovery::MAX_DISCOVERY_RESULT_BYTES;
+    let fixture = Fixture::start(Arc::new(|request, base| {
+        let mut response = standard(request, base, true)?;
+        if request.target.starts_with("/desc") {
+            response.body = format!(
+                "<root><device><friendlyName>{}</friendlyName></device></root>",
+                "n".repeat(MAX_DISCOVERY_RESULT_BYTES)
+            );
+        }
+        Some(response)
+    }))
+    .await;
+    let mut session = fixture.discovery().start(DiscoveryMode::PassiveContinuous);
+    let peer = fixture.search().await;
+    fixture.announce(peer, "desc", "oversized-name").await;
+    let event = timeout(Duration::from_secs(3), session.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(event, Some(DiscoveryEvent::BackendWarning { backend: "Discovery", message })
+        if message.contains("retention limit") && message.contains("session ended"))
+    );
+    assert!(matches!(
+        session.next().await,
+        Some(DiscoveryEvent::Complete)
+    ));
+    assert!(session.next().await.is_none());
+    session.stop().await;
+    fixture.finish().await;
+}

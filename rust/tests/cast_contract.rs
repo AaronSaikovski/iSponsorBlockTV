@@ -306,3 +306,41 @@ async fn eof_close_and_truncated_frames_end_negotiation() {
         fixture.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn mdx_screen_identity_limit_is_bytes_not_characters() {
+    use isponsorblocktv::discovery::MAX_SCREEN_ID_BYTES;
+    for screen_id in [
+        "x".repeat(MAX_SCREEN_ID_BYTES),
+        "x".repeat(MAX_SCREEN_ID_BYTES + 1),
+        "é".repeat(MAX_SCREEN_ID_BYTES),
+    ] {
+        let expected = screen_id.clone();
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let peer = tokio::spawn(async move {
+            handshake(&mut server).await;
+            send(&mut server, "receiver-0", RECEIVER, status("fixture")).await;
+            let request = app_request(&mut server, "fixture").await;
+            send(
+                &mut server,
+                "fixture",
+                MDX,
+                json!({"type":"mdxSessionStatus","requestId":request,
+                    "data":{"screenId":screen_id}}),
+            )
+            .await;
+        });
+        let result = timeout(
+            Duration::from_secs(3),
+            cast_wire::negotiate(&mut client, false, CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+        if expected.len() <= MAX_SCREEN_ID_BYTES {
+            assert_eq!(result.unwrap().as_deref(), Some(expected.as_str()));
+        } else {
+            assert!(matches!(result, Err(CastError::Identity)));
+        }
+        peer.await.unwrap();
+    }
+}

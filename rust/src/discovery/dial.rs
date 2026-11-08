@@ -41,7 +41,7 @@ use super::{
     BackendEvent, Candidate as BackendCandidate, DiscoveredDevice, DiscoveryMode, ProbeContext,
     RETRY_INTERVAL, TransportPolicy,
 };
-use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+use quick_xml::{XmlVersion, events::Event, name::ResolveResult, reader::NsReader};
 use rand::{Rng, rngs::OsRng};
 use reqwest::{
     Method,
@@ -320,10 +320,19 @@ async fn socket_loop(
 /// DTDs and custom entities, and validate the entire bounded document before
 /// returning a field. Device names are literal text, never terminal markup.
 fn xml_field(bytes: &[u8], path: &[&[u8]]) -> Result<Option<String>, &'static str> {
+    xml_field_bounded(bytes, path, crate::http::MAX_BODY_BYTES)
+}
+
+fn xml_field_bounded(
+    bytes: &[u8],
+    path: &[&[u8]],
+    max_bytes: usize,
+) -> Result<Option<String>, &'static str> {
     if bytes.len() > crate::http::MAX_BODY_BYTES {
         return Err("DIAL XML exceeds body limit");
     }
     let mut reader = NsReader::from_reader(bytes);
+    let mut version = XmlVersion::Implicit1_0;
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut roots = 0;
     let mut value = String::new();
@@ -350,13 +359,13 @@ fn xml_field(bytes: &[u8], path: &[&[u8]]) -> Result<Option<String>, &'static st
                 for attribute in element.attributes() {
                     let attribute = attribute.map_err(|_| "Malformed XML attribute")?;
                     if matches!(
-                        reader.resolve_attribute(attribute.key).0,
+                        reader.resolver().resolve_attribute(attribute.key).0,
                         ResolveResult::Unknown(_)
                     ) {
                         return Err("Undefined XML attribute namespace prefix");
                     }
                     attribute
-                        .decode_and_unescape_value(reader.decoder())
+                        .decoded_and_normalized_value(version, reader.decoder())
                         .map_err(|_| "Invalid XML attribute entity")?;
                 }
                 if !empty {
@@ -368,13 +377,23 @@ fn xml_field(bytes: &[u8], path: &[&[u8]]) -> Result<Option<String>, &'static st
                     return Err("Malformed DIAL XML nesting");
                 }
             }
+            Event::Decl(declaration) => {
+                version = declaration
+                    .xml_version()
+                    .map_err(|_| "Invalid XML version")?;
+            }
             Event::DocType(_) => return Err("DIAL XML document types are forbidden"),
             Event::Text(text) => {
-                let text = text.xml_content().map_err(|_| "Invalid DIAL XML text")?;
+                let text = text
+                    .xml_content(version)
+                    .map_err(|_| "Invalid DIAL XML text")?;
                 if stack.is_empty() && !text.trim().is_empty() {
                     return Err("Text outside XML root");
                 }
                 if stack.iter().map(Vec::as_slice).eq(path.iter().copied()) {
+                    if text.len() > max_bytes - value.len() {
+                        return Err("DIAL XML field exceeds retention limit");
+                    }
                     value.push_str(&text);
                     found = true;
                 }
@@ -384,7 +403,11 @@ fn xml_field(bytes: &[u8], path: &[&[u8]]) -> Result<Option<String>, &'static st
                     return Err("Text outside XML root");
                 }
                 if stack.iter().map(Vec::as_slice).eq(path.iter().copied()) {
-                    value.push_str(&text.decode().map_err(|_| "Invalid DIAL XML text")?);
+                    let text = text.decode().map_err(|_| "Invalid DIAL XML text")?;
+                    if text.len() > max_bytes - value.len() {
+                        return Err("DIAL XML field exceeds retention limit");
+                    }
+                    value.push_str(&text);
                     found = true;
                 }
             }
@@ -407,6 +430,9 @@ fn xml_field(bytes: &[u8], path: &[&[u8]]) -> Result<Option<String>, &'static st
                     return Err("Text outside XML root");
                 }
                 if stack.iter().map(Vec::as_slice).eq(path.iter().copied()) {
+                    if character.len_utf8() > max_bytes - value.len() {
+                        return Err("DIAL XML field exceeds retention limit");
+                    }
                     value.push(character);
                     found = true;
                 }
@@ -464,9 +490,10 @@ pub(crate) async fn probe(
         return Err("DIAL application redirects are forbidden");
     }
     if response.status.is_success() {
-        if let Some(screen_id) = xml_field(
+        if let Some(screen_id) = xml_field_bounded(
             &response.body,
             &[b"service", b"additionalData", b"screenId"],
+            super::MAX_SCREEN_ID_BYTES,
         )? {
             return Ok(Some(DiscoveredDevice { screen_id, name }));
         }
@@ -516,6 +543,7 @@ pub(crate) async fn probe(
         }
         match context.api.pair_with_code(&code).await {
             Ok(Some(paired)) => {
+                super::validate_screen_id(&paired.screen_id)?;
                 return Ok(Some(DiscoveredDevice {
                     screen_id: paired.screen_id,
                     name,
@@ -608,5 +636,21 @@ mod tests {
         let deep = format!("{}{}", "<a>".repeat(65), "</a>".repeat(65));
         assert!(xml_field(deep.as_bytes(), path).is_err());
         assert!(xml_field(&vec![b'x'; crate::http::MAX_BODY_BYTES + 1], path).is_err());
+    }
+
+    #[test]
+    fn excessive_namespace_declarations_are_rejected() {
+        let mut xml = String::from("<service");
+        for index in 0..257 {
+            xml.push_str(&format!(" xmlns:n{index}='urn:fixture:{index}'"));
+        }
+        xml.push_str("><additionalData><screenId>screen</screenId></additionalData></service>");
+        assert!(
+            xml_field(
+                xml.as_bytes(),
+                &[b"service", b"additionalData", b"screenId"]
+            )
+            .is_err()
+        );
     }
 }

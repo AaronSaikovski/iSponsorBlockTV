@@ -83,8 +83,9 @@ editing configuration underneath a running controller; restart to load changes.
 After a native release is published, download the matching
 `iSponsorBlockTV-rust-<version>-<target>` archive and `SHA256SUMS-rust.txt` from
 this repository's GitHub release. Match both OS and CPU architecture. Unix
-archives are `.tar.gz`; Windows archives are `.zip`. They include the executable
-and license; no Python or Rust compiler is required to run them.
+archives are `.tar.gz`; Windows archives are `.zip`. They include the executable,
+license and third-party notices; keep these together when redistributing.
+No Python or Rust compiler is required to run them.
 
 Verify the downloaded archive against its entry in the checksum file, then
 extract it. Linux can use `sha256sum <archive>`; macOS can use

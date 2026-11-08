@@ -26,7 +26,7 @@ pub struct Request {
     pub query: BTreeMap<String, String>,
     pub form: BTreeMap<String, String>,
     pub device: String,
-    /// Deferred seek responses let tests order playback observations before HTTP.
+    /// Deferred seek and segment responses let tests order observations before HTTP.
     pub reply: Option<oneshot::Sender<u16>>,
 }
 impl Request {
@@ -56,6 +56,14 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn start(defer_seeks: bool) -> Self {
+        Self::start_with_options(defer_seeks, false).await
+    }
+
+    pub async fn start_with_deferred_segments() -> Self {
+        Self::start_with_options(true, true).await
+    }
+
+    async fn start_with_options(defer_seeks: bool, defer_segments: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let endpoints = Endpoints {
@@ -76,7 +84,7 @@ impl Fixture {
                     accepted = listener.accept() => {
                         let (socket, _) = accepted.unwrap();
                         let sender = sender.clone(); let streams = shared.clone();
-                        jobs.spawn(async move { serve(socket, sender, streams, defer_seeks).await; });
+                        jobs.spawn(async move { serve(socket, sender, streams, defer_seeks, defer_segments).await; });
                     },
                     result = jobs.join_next(), if !jobs.is_empty() => { if let Some(result) = result { result.unwrap(); } },
                 }
@@ -283,6 +291,7 @@ async fn serve(
     sender: mpsc::Sender<Request>,
     streams: Streams,
     defer_seeks: bool,
+    defer_segments: bool,
 ) {
     let mut request = read_request(&mut socket).await;
     let path = request.path.clone();
@@ -299,11 +308,22 @@ async fn serve(
         sender.send(request).await.unwrap();
         reply(&mut socket, 200, r#"{"screens":[{"status":"online"}]}"#).await;
     } else if path.contains("skipSegments/") {
+        let receive = if defer_segments {
+            let (tx, rx) = oneshot::channel();
+            request.reply = Some(tx);
+            Some(rx)
+        } else {
+            None
+        };
         sender.send(request).await.unwrap();
         let segments: Vec<_> = ["video-a", "video-b", "video-next"].iter().map(|video| json!({
             "videoID":video,"segments":[{"segment":[0,5],"UUID":format!("uuid-{video}"),"locked":1,"category":"sponsor","actionType":"skip"}]
         })).collect();
-        reply(&mut socket, 200, &json!(segments).to_string()).await;
+        let status = match receive {
+            Some(rx) => rx.await.unwrap_or(500),
+            None => 200,
+        };
+        reply(&mut socket, status, &json!(segments).to_string()).await;
     } else if path.contains("viewedVideoSponsorTime") {
         sender.send(request).await.unwrap();
         reply(&mut socket, 200, "{}").await;

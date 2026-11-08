@@ -20,12 +20,12 @@ tokio = { version = "1.48.0", default-features = false, features = ["rt-multi-th
 reqwest = { version = "0.12.28", default-features = false, features = ["native-tls-vendored", "json", "stream", "gzip"] }
 native-tls = { version = "0.2.14", default-features = false, features = ["vendored"] }
 tokio-native-tls = { version = "0.3.1", default-features = false, features = ["vendored"] }
-ratatui = { version = "0.29.0", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_28", "layout-cache"] }
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 mdns-sd = { version = "0.21.6", default-features = false, features = ["async", "logging"] }
 if-addrs = { version = "0.15.0", features = ["link-local"] }
 socket2 = "0.6"
-quick-xml = { version = "0.38.4", default-features = false, features = ["encoding"] }
+quick-xml = { version = "0.41.0", default-features = false, features = ["encoding"] }
 prost = { version = "0.14.1", default-features = false, features = ["derive", "std"] }
 clap = { version = "4.5.50", features = ["derive", "env"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -34,7 +34,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
-lru = "0.12"
+lru = "0.18.2"
 url = "2"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["rt"] }

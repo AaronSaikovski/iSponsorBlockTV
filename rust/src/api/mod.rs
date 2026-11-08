@@ -60,7 +60,7 @@ pub struct ChannelResult {
     pub subscribers: String,
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum ApiError {
     #[error(transparent)]
     Http(#[from] HttpError),

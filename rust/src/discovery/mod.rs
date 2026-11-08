@@ -24,6 +24,58 @@ pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CANDIDATES: usize = 256;
 const MAX_PROBES: usize = 8;
 
+/// Screen IDs are opaque tokens (normally tens of bytes), not response bodies.
+/// Allow ample headroom without retaining near-megabyte protocol fields.
+pub const MAX_SCREEN_ID_BYTES: usize = 256;
+/// Independent of candidate admissions: refreshed receivers can return new IDs.
+pub const MAX_DISCOVERY_RESULTS: usize = 256;
+/// Total emitted names/IDs plus the coordinator's retained ID copies. This also
+/// bounds consumers that retain every device emitted during a passive session.
+pub const MAX_DISCOVERY_RESULT_BYTES: usize = 64 * 1024;
+const RESULT_LIMIT_WARNING: &str = "Discovery result retention limit reached; session ended";
+
+fn validate_screen_id(id: &str) -> Result<(), &'static str> {
+    if id.is_empty() || id.len() > MAX_SCREEN_ID_BYTES {
+        Err("Discovery screen ID is empty or exceeds 256 bytes")
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Results {
+    screen_ids: HashSet<String>,
+    bytes: usize,
+}
+
+impl Results {
+    /// Validate identities before calling; duplicates consume no additional
+    /// budget or allocation, even when a refreshed receiver changes its name.
+    fn insert(&mut self, device: &DiscoveredDevice) -> Result<bool, &'static str> {
+        if self.screen_ids.contains(&device.screen_id) {
+            return Ok(false);
+        }
+        let bytes = device
+            .screen_id
+            .len()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(device.name.len()))
+            .and_then(|bytes| bytes.checked_add(self.bytes))
+            .filter(|bytes| *bytes <= MAX_DISCOVERY_RESULT_BYTES)
+            .ok_or(RESULT_LIMIT_WARNING)?;
+        if self.screen_ids.len() >= MAX_DISCOVERY_RESULTS {
+            return Err(RESULT_LIMIT_WARNING);
+        }
+        self.screen_ids.insert(device.screen_id.clone());
+        self.bytes = bytes;
+        Ok(true)
+    }
+
+    fn full(&self) -> bool {
+        self.screen_ids.len() == MAX_DISCOVERY_RESULTS || self.bytes == MAX_DISCOVERY_RESULT_BYTES
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiscoveryMode {
     ActiveOnce,
@@ -368,8 +420,7 @@ async fn run_session(
 ) {
     let admission_end =
         (context.mode == DiscoveryMode::ActiveOnce).then_some(start + ADMISSION_WINDOW);
-    let end = admission_end.map(|end| end + PROBE_WINDOW);
-    let (input_tx, mut input) = mpsc::channel(64);
+    let (input_tx, input) = mpsc::channel(64);
     let collector_cancel = cancel.child_token();
     let mut collectors = JoinSet::new();
     collectors.spawn(dial::collect(
@@ -388,9 +439,33 @@ async fn run_session(
         ));
     }
     drop(input_tx);
+    run_coordinator(
+        context,
+        cancel,
+        output,
+        start,
+        input,
+        collector_cancel,
+        collectors,
+    )
+    .await;
+}
+
+async fn run_coordinator(
+    context: ProbeContext,
+    cancel: CancellationToken,
+    output: mpsc::Sender<DiscoveryEvent>,
+    start: Instant,
+    mut input: mpsc::Receiver<BackendEvent>,
+    collector_cancel: CancellationToken,
+    mut collectors: JoinSet<()>,
+) {
+    let admission_end =
+        (context.mode == DiscoveryMode::ActiveOnce).then_some(start + ADMISSION_WINDOW);
+    let end = admission_end.map(|end| end + PROBE_WINDOW);
     let mut probes = JoinSet::new();
     let mut admissions = Admissions::new(context.mode, admission_end);
-    let mut screen_ids = HashSet::new();
+    let mut results = Results::default();
     let mut overflow_warned = false;
     let mut input_closed = false;
     loop {
@@ -443,8 +518,33 @@ async fn run_session(
                         match result.result {
                             Ok(Some(device)) => {
                                 admissions.records[result.record].succeeded = true;
-                                if screen_ids.insert(device.screen_id.clone()) &&
-                                    !emit(&output, &cancel, end, DiscoveryEvent::Device(device)).await { break; }
+                                if let Err(message) = validate_screen_id(&device.screen_id) {
+                                    if !emit(&output, &cancel, end, DiscoveryEvent::BackendWarning {
+                                        backend: result.backend, message: message.into(),
+                                    }).await { break; }
+                                    continue;
+                                }
+                                let exhausted = match results.insert(&device) {
+                                    Ok(false) => continue,
+                                    Ok(true) => {
+                                        if !emit(&output, &cancel, end, DiscoveryEvent::Device(device)).await { break; }
+                                        results.full()
+                                    }
+                                    Err(_) => true,
+                                };
+                                if exhausted {
+                                    // Stop network work before waiting for a slow result
+                                    // consumer; cancellation still interrupts the warning.
+                                    input.close();
+                                    collector_cancel.cancel();
+                                    probes.abort_all();
+                                    if emit(&output, &cancel, end, DiscoveryEvent::BackendWarning {
+                                        backend: "Discovery", message: RESULT_LIMIT_WARNING.into(),
+                                    }).await && context.mode == DiscoveryMode::PassiveContinuous {
+                                        let _ = emit(&output, &cancel, end, DiscoveryEvent::Complete).await;
+                                    }
+                                    break;
+                                }
                             }
                             Ok(None) => {},
                             Err(message) => if !emit(&output, &cancel, end, DiscoveryEvent::BackendWarning {

@@ -73,6 +73,9 @@ selects that local image; otherwise Compose selects the published image referenc
 - Keep async work cancellation-aware with `CancellationToken`, tracked tasks,
   bounded channels, and explicit shutdown. Shared services use `Arc` and bounded
   mutex-protected caches; release cache locks before network awaits.
+  Same-video segment lookups share in-flight work; cancelling one consumer must
+  not cancel another, and dropping all consumers must release the HTTP request.
+  Setup reuses API clients only while credential and proxy options match.
 - Keep playback mutation inside its device actor. Validate connection/video
   identity and revisions before applying async completions. Keep scheduler logic
   pure with explicit time inputs, rather than performing network effects there.
@@ -130,6 +133,8 @@ selects that local image; otherwise Compose selects the published image referenc
   Keep its generated directory and local images available for subsequent builds.
 - Source `Dockerfile` uses the parent-root context; `Dockerfile.artifacts` uses
   this directory and requires prebuilt `dist/` binaries, CA bundle, and license.
+  Both distribution paths must include `THIRD_PARTY_NOTICES.md`; retain its source
+  attribution notices when changing adapted discovery/protocol code.
 - Active discovery can launch YouTube on real devices; LAN multicast is needed
   for discovery, not normal Lounge control. Use one controller per device.
 

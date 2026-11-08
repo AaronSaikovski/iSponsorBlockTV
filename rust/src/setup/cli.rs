@@ -440,21 +440,29 @@ fn string<'a>(document: &'a ConfigDocument, key: &str) -> Result<&'a str, SetupE
     }
 }
 
+pub(super) fn api_settings(document: &ConfigDocument) -> Result<(&str, bool), SetupError> {
+    Ok((
+        string(document, "apikey")?,
+        document
+            .0
+            .get("use_proxy")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    ))
+}
+
 pub(super) fn api_for(
     document: &ConfigDocument,
     endpoints: Endpoints,
     http_tracing: bool,
 ) -> Result<ApiClient, SetupError> {
+    let (apikey, use_proxy) = api_settings(document)?;
     // Setup performs no whitelist decisions. Excluding incomplete draft records
     // here allows editing/saving them without imposing service-start validation.
     Ok(ApiClient::new(
         ApiOptions {
-            apikey: string(document, "apikey")?.to_owned(),
-            use_proxy: document
-                .0
-                .get("use_proxy")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            apikey: apikey.to_owned(),
+            use_proxy,
             http_tracing,
             channel_whitelist: Vec::new(),
         },

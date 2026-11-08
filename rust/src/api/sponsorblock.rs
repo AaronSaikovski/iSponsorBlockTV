@@ -2,12 +2,16 @@
 //! sponsor-block 0.6.1 client's closed categories, f32 timestamps and private
 //! reqwest client cannot preserve this application's configuration contract.
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use futures_util::{
+    FutureExt,
+    future::{BoxFuture, WeakShared},
+};
 use lru::LruCache;
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -32,19 +36,47 @@ struct Cached {
     expiry: Option<Instant>,
 }
 
+type SegmentLookup = BoxFuture<'static, Result<Arc<[Segment]>, ApiError>>;
+
+struct Lookups {
+    cache: LruCache<Arc<str>, Cached>,
+    in_flight: HashMap<Arc<str>, WeakShared<SegmentLookup>>,
+}
+
 struct State {
     api: ApiClient,
     categories: Vec<String>,
     minimum: f64,
     tracking: bool,
-    cache: Mutex<LruCache<String, Cached>>,
+    lookups: Mutex<Lookups>,
 }
 
-/// Clones share immutable options and bounded caches. Construct a fresh service
-/// when configuration changes. No cache mutex is held during network work.
+/// Clones share immutable options, bounded caches, and active per-video lookups.
+/// Construct a fresh service when configuration changes. No mutex is held during
+/// network work; dropping the last waiter cancels that video's lookup.
 #[derive(Clone)]
 pub struct ApiService {
     state: Arc<State>,
+}
+
+struct InFlight {
+    service: ApiService,
+    video_id: Arc<str>,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Ok(mut lookups) = self.service.state.lookups.lock()
+            && lookups
+                .in_flight
+                .get_key_value(self.video_id.as_ref())
+                .is_some_and(|(video_id, _)| Arc::ptr_eq(video_id, &self.video_id))
+        {
+            // A cancelled generation may finish dropping after a new lookup
+            // registered; its cleanup must never remove the replacement.
+            lookups.in_flight.remove(self.video_id.as_ref());
+        }
+    }
 }
 
 impl ApiService {
@@ -74,9 +106,10 @@ impl ApiService {
                 categories: config.skip_categories.clone(),
                 minimum: config.minimum_skip_length,
                 tracking: config.skip_count_tracking,
-                cache: Mutex::new(LruCache::new(
-                    NonZeroUsize::new(10).expect("nonzero capacity"),
-                )),
+                lookups: Mutex::new(Lookups {
+                    cache: LruCache::new(NonZeroUsize::new(10).expect("nonzero capacity")),
+                    in_flight: HashMap::new(),
+                }),
             }),
         })
     }
@@ -85,19 +118,55 @@ impl ApiService {
         if self.state.categories.is_empty() {
             return Ok(Arc::from([]));
         }
-        {
-            let mut cache = self
+        let lookup = {
+            // Cache inspection and registration share one lock, so a completed
+            // request cannot slip between a cache miss and a new lookup.
+            let mut lookups = self
                 .state
-                .cache
+                .lookups
                 .lock()
                 .map_err(|_| ApiError::CacheUnavailable)?;
-            if let Some(entry) = cache.get(video_id) {
+            if let Some(entry) = lookups.cache.get(video_id) {
                 if entry.expiry.is_none_or(|expiry| Instant::now() < expiry) {
                     return Ok(Arc::clone(&entry.segments));
                 }
-                cache.pop(video_id);
+                lookups.cache.pop(video_id);
             }
-        }
+            if let Some(lookup) = lookups
+                .in_flight
+                .get(video_id)
+                .and_then(WeakShared::upgrade)
+            {
+                lookup
+            } else {
+                // Weak entries never keep HTTP work alive without a waiter.
+                // Remove a dead generation first: HashMap::insert would retain
+                // its key allocation and defeat identity-based drop cleanup.
+                lookups.in_flight.remove(video_id);
+                let video_id: Arc<str> = Arc::from(video_id);
+                let registration = InFlight {
+                    service: self.clone(),
+                    video_id: Arc::clone(&video_id),
+                };
+                let lookup = async move {
+                    registration
+                        .service
+                        .fetch_segments(&registration.video_id)
+                        .await
+                }
+                .boxed()
+                .shared();
+                lookups.in_flight.insert(
+                    video_id,
+                    lookup.downgrade().expect("new lookup has not completed"),
+                );
+                lookup
+            }
+        };
+        lookup.await
+    }
+
+    async fn fetch_segments(&self, video_id: &Arc<str>) -> Result<Arc<[Segment]>, ApiError> {
         let (segments, locked) = if self.state.api.is_whitelisted(video_id).await? {
             (Vec::new(), false)
         } else {
@@ -147,11 +216,12 @@ impl ApiService {
             Some(Instant::now() + TTL)
         };
         self.state
-            .cache
+            .lookups
             .lock()
             .map_err(|_| ApiError::CacheUnavailable)?
+            .cache
             .put(
-                video_id.to_owned(),
+                Arc::clone(video_id),
                 Cached {
                     segments: Arc::clone(&segments),
                     expiry,

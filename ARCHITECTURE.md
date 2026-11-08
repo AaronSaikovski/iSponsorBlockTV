@@ -346,8 +346,12 @@ the corresponding contracts under `rust/tests/`; they are not hardware proof.
   ten-entry monotonic LRU expires unlocked/empty successes at 300 seconds,
   retains nonempty all-locked results until eviction, and never caches failures.
   Intervals are shared through `Arc<[Segment]>`. Cache locks do not cross network
-  awaits; concurrent misses may fetch twice. Channel search and whitelist
-  decisions have separate bounded LRUs of 10 and 100 entries respectively.
+  awaits. Concurrent misses for the same video share one in-flight lookup and
+  result, while different videos remain concurrent. Cancelling one waiter leaves
+  the others intact; cancelling all waiters drops the network operation. Failed
+  results are shared only with current waiters, not cached for later retries.
+  Channel search and whitelist decisions have separate bounded LRUs of 10 and
+  100 entries respectively.
 
 ### Runtime identity, scheduling, and shutdown
 
@@ -360,7 +364,9 @@ return values rather than mutating actor state.
 - **INV-11 — Native work identity:** replacing a connection increments connection
   and video epochs; changing video ID also increments video epoch. Routine
   observations, pause/speed changes, and same-video seeks change revision, not
-  video identity. Segment results must match epochs, revision, and video.
+  video identity. Segment results must match epochs and video, not playback
+  revision; same-video observations preserve in-flight lookups and schedule
+  accepted metadata against the latest playback snapshot.
   Unsent scheduling is recomputed on observations. Already dispatched commands
   use attempt ID plus connection/video epochs, so an acknowledgement arriving
   before HTTP completion does not incorrectly suppress legitimate reporting.
@@ -412,8 +418,12 @@ the coordinator and its work. Both backends share admission for at most 256
 candidates and eight concurrent probes. Active admission is limited to the first
 five seconds; each admitted probe has a 45-second deadline including queue time,
 so active sessions end within fifty seconds. Endpoint/UUID deduplication precedes
-probes and screen-ID deduplication precedes delivered devices. Backend warnings
-remain visible without disabling the other backend.
+probes and screen-ID deduplication precedes delivered devices. Screen IDs are
+limited to 256 UTF-8 bytes. A separate lifetime budget permits at most 256
+results and 64 KiB of retained names/IDs (including deduplication ID copies),
+including refreshed candidates. Exhaustion cancels work and emits a warning
+followed by completion, even in passive mode. Other backend warnings remain
+visible without disabling the other backend.
 
 Active DIAL may launch YouTube with a generated pairing code; active Cast may
 launch YouTube before extracting MDX screen identity. Passive discovery queries
@@ -446,8 +456,10 @@ Unknown category strings and unedited configuration fields remain intact.
   instance and request generation. Input changes, retry, close/reopen, and
   relevant network-option edits invalidate results. Old pairing validation
   cannot authorize a changed code. Effect owners cancel/join obsolete requests
-  and discovery, and construct clients from current draft options. Only the
-  reducer mutates the draft; `tui_contract` exercises stale-result rejection.
+  and discovery. The TUI reuses its API client across pairing/search effects while
+  API-key and proxy settings are unchanged; changed options replace the client
+  and its caches. Only the reducer mutates the draft; `tui_contract` exercises
+  stale-result rejection.
 - **INV-15 — Native terminal restoration:** one Crossterm event stream drives
   keyboard, mouse, paste, and resize events. A terminal guard restores raw mode,
   alternate screen, mouse/paste modes, and cursor on return/error. Owned jobs

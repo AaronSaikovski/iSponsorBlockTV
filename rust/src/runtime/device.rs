@@ -72,6 +72,7 @@ pub(super) struct DeviceActor {
     segments: Arc<[Segment]>,
     suppressed: Vec<Suppression>,
     fetch: Option<AbortHandle>,
+    segments_refresh_at: Option<Instant>,
     prefetches: HashSet<String>,
     lifecycle_busy: bool,
     stream_started: bool,
@@ -95,7 +96,7 @@ enum Completion {
     Recovered(u64, Result<(), LoungeError>),
     StreamEnded(u64, Result<(), LoungeError>),
     Command(u64, Result<(), LoungeError>),
-    Segments(Identity, u64, String, Result<Arc<[Segment]>, ApiError>),
+    Segments(Identity, String, Result<Arc<[Segment]>, ApiError>),
     Prefetched(u64, String),
     Reported(Result<(), ApiError>),
     Cancelled,
@@ -139,6 +140,7 @@ impl DeviceActor {
             segments: Arc::from([]),
             suppressed: Vec::new(),
             fetch: None,
+            segments_refresh_at: None,
             prefetches: HashSet::new(),
             lifecycle_busy: false,
             stream_started: false,
@@ -157,6 +159,7 @@ impl DeviceActor {
     }
 
     pub(super) async fn run(mut self, shutdown: CancellationToken) {
+        tracing::info!("Monitoring configured device");
         let (sender, mut receiver) = mpsc::channel::<(u64, Envelope)>(256);
         let mut watchdog = tokio::time::interval_at(Instant::now() + RETRY, RETRY);
         loop {
@@ -253,6 +256,7 @@ impl DeviceActor {
         self.snapshot.speed = 1.0;
         self.snapshot.observed = Instant::now();
         self.segments = Arc::from([]);
+        self.segments_refresh_at = None;
         self.suppressed.clear();
         self.queue.clear();
         self.prefetches.clear();
@@ -272,6 +276,10 @@ impl DeviceActor {
             self.token = None;
         }
         self.retry_at = Instant::now() + RETRY;
+        tracing::info!(
+            retry_seconds = RETRY.as_secs(),
+            "Device session reset; reconnect scheduled"
+        );
     }
 
     fn start_lifecycle(&mut self) {
@@ -393,6 +401,8 @@ impl DeviceActor {
                                 "Lounge handshake did not provide both session identifiers"
                             );
                             self.reset(false);
+                        } else if self.connected {
+                            tracing::info!("Connected to YouTube");
                         }
                     }
                     Err(error) => self.handle_error(error),
@@ -453,6 +463,9 @@ impl DeviceActor {
                 if attempt.identity != Identity::of(&self.snapshot) {
                     return;
                 }
+                if result.is_ok() && attempt.seek {
+                    tracing::info!(segments = attempt.uuids.len(), "SponsorBlock seek accepted");
+                }
                 match result {
                     Ok(())
                         if attempt.seek
@@ -484,15 +497,21 @@ impl DeviceActor {
                     }
                 }
             }
-            Completion::Segments(identity, revision, video, result)
-                if identity == Identity::of(&self.snapshot)
-                    && revision == self.snapshot.revision
-                    && video == self.snapshot.video_id =>
+            Completion::Segments(identity, video, result)
+                if identity == Identity::of(&self.snapshot) && video == self.snapshot.video_id =>
             {
                 self.fetch = None;
                 match result {
-                    Ok(segments) => self.segments = segments,
-                    Err(error) => tracing::warn!(error = %error, "Segment lookup failed"),
+                    Ok(segments) => {
+                        self.segments = segments;
+                        // Periodically consult the API cache again so its
+                        // expiring empty/unlocked entries can be refreshed.
+                        self.segments_refresh_at = Some(Instant::now() + Duration::from_secs(300));
+                    }
+                    Err(error) => {
+                        self.segments_refresh_at = None;
+                        tracing::warn!(error = %error, "Segment lookup failed");
+                    }
                 }
             }
             Completion::Prefetched(epoch, video) if epoch == current => {
@@ -556,6 +575,11 @@ impl DeviceActor {
                     self.snapshot.video_id = video_id;
                     self.suppressed.clear();
                     self.queue.clear();
+                    if let Some(fetch) = self.fetch.take() {
+                        fetch.abort();
+                    }
+                    self.segments = Arc::from([]);
+                    self.segments_refresh_at = None;
                 }
                 self.observe(position, duration, Some(state));
                 if state == 1 {
@@ -683,25 +707,33 @@ impl DeviceActor {
 
     fn invalidate_schedule(&mut self) {
         self.snapshot.revision += 1;
-        if let Some(fetch) = self.fetch.take() {
-            fetch.abort();
-        }
-        self.segments = Arc::from([]);
-        if self.snapshot.video_id.is_empty() {
-            return;
-        }
-        if !self.snapshot.speed.is_finite() || self.snapshot.speed <= 0.0 {
+        self.fetch_segments();
+    }
+
+    fn fetch_segments(&mut self) {
+        // Playback revisions retain both pending requests and completed data.
+        // After a failure, the next observation retries; successful results
+        // (including empty ones) are reused until the cache refresh deadline.
+        if self.fetch.is_some()
+            || self
+                .segments_refresh_at
+                .is_some_and(|deadline| Instant::now() < deadline)
+            || self.snapshot.video_id.is_empty()
+            || !self.snapshot.speed.is_finite()
+            || self.snapshot.speed <= 0.0
+        {
             return;
         }
         let identity = Identity::of(&self.snapshot);
-        let revision = self.snapshot.revision;
         let video = self.snapshot.video_id.clone();
         let api = self.api.clone();
         let cancel = self.video_cancel.clone();
-        self.fetch = Some(self.jobs.spawn(async move { tokio::select! {
-            _ = cancel.cancelled() => Completion::Cancelled,
-            result = api.segments(&video) => Completion::Segments(identity, revision, video, result),
-        }}));
+        self.fetch = Some(self.jobs.spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Completion::Cancelled,
+                result = api.segments(&video) => Completion::Segments(identity, video, result),
+            }
+        }));
     }
 
     fn prefetch(&mut self, video: Option<String>) {
@@ -999,37 +1031,210 @@ mod tests {
         assert_eq!(actor.queue.len(), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn segment_metadata_survives_playback_revisions_including_empty_results() {
+        for segments in [
+            Arc::<[Segment]>::from([]),
+            Arc::from([Segment {
+                start: 0.0,
+                end: 5.0,
+                uuids: vec![],
+            }]),
+        ] {
+            let mut actor = actor();
+            actor.snapshot.video_id = "current".into();
+            actor.snapshot.position = 20.0;
+            let identity = Identity::of(&actor.snapshot);
+            let revision = actor.snapshot.revision;
+            let (send, receive) = tokio::sync::oneshot::channel();
+            actor.fetch = Some(actor.jobs.spawn(async move {
+                Completion::Segments(identity, "current".into(), receive.await.unwrap())
+            }));
+
+            actor.event(LoungeEvent::StateChange {
+                position: Some(12.0),
+                duration: None,
+                state: Some(2),
+            });
+            actor.event(LoungeEvent::NowPlaying {
+                video_id: "current".into(),
+                position: Some(1.0),
+                duration: None,
+                state: 1,
+            });
+            actor.event(LoungeEvent::PlaybackSpeed { speed: 2.0 });
+            assert!(actor.snapshot.revision > revision);
+            assert!(actor.fetch.is_some());
+            assert_eq!(actor.jobs.len(), 1, "observations must not restart lookup");
+
+            send.send(Ok(segments.clone())).unwrap();
+            let completion = actor.jobs.join_next().await.unwrap().unwrap();
+            actor.complete(completion);
+            assert!(actor.fetch.is_none());
+            assert!(Arc::ptr_eq(&actor.segments, &segments));
+            assert_eq!(
+                next_skip(
+                    &actor.snapshot,
+                    &actor.segments,
+                    &actor.suppressed,
+                    0.0,
+                    Instant::now(),
+                ),
+                (!segments.is_empty()).then_some((0, Duration::ZERO)),
+                "completion must schedule from the latest position",
+            );
+
+            actor.observe(Some(2.0), None, Some(2));
+            actor.event(LoungeEvent::PlaybackSpeed { speed: 0.0 });
+            actor.observe(Some(1.0), None, Some(1));
+            actor.event(LoungeEvent::PlaybackSpeed { speed: 1.0 });
+            assert!(Arc::ptr_eq(&actor.segments, &segments));
+            assert!(
+                actor.jobs.is_empty(),
+                "completed metadata must not be refetched"
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn stale_segment_results_cannot_change_scheduling() {
+    async fn failed_segment_lookup_retries_on_next_observation_without_duplicate_fetches() {
         let mut actor = actor();
         actor.snapshot.video_id = "current".into();
-        actor.snapshot.revision = 3;
+        let identity = Identity::of(&actor.snapshot);
+        let (send, receive) = tokio::sync::oneshot::channel();
+        actor.fetch = Some(actor.jobs.spawn(async move {
+            Completion::Segments(identity, "current".into(), receive.await.unwrap())
+        }));
+        send.send(Err(ApiError::Status {
+            service: "SponsorBlock",
+            status: 503,
+        }))
+        .unwrap();
+        let completion = actor.jobs.join_next().await.unwrap().unwrap();
+        actor.complete(completion);
+        assert!(actor.fetch.is_none());
+        assert!(
+            actor.jobs.is_empty(),
+            "failure alone must not trigger a retry"
+        );
+
+        actor.observe(Some(1.0), None, Some(1));
+        assert!(actor.fetch.is_some());
+        assert_eq!(actor.jobs.len(), 1);
+        actor.observe(Some(2.0), None, Some(2));
+        actor.event(LoungeEvent::PlaybackSpeed { speed: 2.0 });
+        assert_eq!(
+            actor.jobs.len(),
+            1,
+            "pending retry must survive observations"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_segment_results_refresh_only_after_deadline_on_observation() {
+        for segments in [
+            Arc::<[Segment]>::from([]),
+            Arc::from([Segment {
+                start: 0.0,
+                end: 5.0,
+                uuids: vec![],
+            }]),
+        ] {
+            let mut actor = actor();
+            actor.snapshot.video_id = "current".into();
+            actor.complete(Completion::Segments(
+                Identity::of(&actor.snapshot),
+                "current".into(),
+                Ok(segments.clone()),
+            ));
+            tokio::time::advance(Duration::from_secs(299)).await;
+            actor.observe(Some(1.0), None, Some(1));
+            assert!(actor.jobs.is_empty());
+            tokio::time::advance(Duration::from_secs(1)).await;
+            assert!(actor.jobs.is_empty(), "refresh requires an observation");
+            actor.observe(Some(2.0), None, Some(1));
+            assert!(actor.fetch.is_some());
+            assert_eq!(actor.jobs.len(), 1);
+            assert!(
+                Arc::ptr_eq(&actor.segments, &segments),
+                "refresh must retain completed metadata until replacement"
+            );
+            actor.observe(Some(3.0), None, Some(1));
+            assert_eq!(actor.jobs.len(), 1, "refresh must not be restarted");
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_video_and_session_segment_results_cannot_change_scheduling() {
+        let mut actor = actor();
+        actor.snapshot.video_id = "current".into();
         let identity = Identity::of(&actor.snapshot);
         let segments: Arc<[Segment]> = Arc::from([Segment {
             start: 0.0,
             end: 5.0,
             uuids: vec![],
         }]);
+        for (stale_identity, video) in [
+            (
+                Identity {
+                    connection: identity.connection + 1,
+                    ..identity
+                },
+                "current",
+            ),
+            (
+                Identity {
+                    video: identity.video + 1,
+                    ..identity
+                },
+                "current",
+            ),
+            (identity, "previous"),
+        ] {
+            actor.complete(Completion::Segments(
+                stale_identity,
+                video.into(),
+                Ok(segments.clone()),
+            ));
+            assert!(actor.segments.is_empty());
+        }
         actor.complete(Completion::Segments(
             identity,
-            2,
-            "current".into(),
-            Ok(segments.clone()),
-        ));
-        actor.complete(Completion::Segments(
-            identity,
-            3,
-            "previous".into(),
-            Ok(segments.clone()),
-        ));
-        assert!(actor.segments.is_empty());
-        actor.complete(Completion::Segments(
-            identity,
-            3,
             "current".into(),
             Ok(segments),
         ));
         assert_eq!(actor.segments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn video_and_session_changes_cancel_pending_segment_lookup() {
+        for reconnect in [false, true] {
+            let mut actor = actor();
+            actor.snapshot.video_id = "current".into();
+            actor.segments = Arc::from([Segment {
+                start: 0.0,
+                end: 5.0,
+                uuids: vec![],
+            }]);
+            let cancel = actor.video_cancel.clone();
+            let pending = tokio::spawn(std::future::pending::<Completion>());
+            actor.fetch = Some(pending.abort_handle());
+
+            if reconnect {
+                actor.reset(false);
+            } else {
+                actor.event(LoungeEvent::NowPlaying {
+                    video_id: "next".into(),
+                    position: Some(0.0),
+                    duration: None,
+                    state: 1,
+                });
+                assert!(actor.fetch.is_some(), "new video needs its own lookup");
+            }
+            assert!(cancel.is_cancelled());
+            assert!(actor.segments.is_empty());
+            assert!(matches!(pending.await, Err(error) if error.is_cancelled()));
+        }
     }
 
     #[tokio::test(start_paused = true)]

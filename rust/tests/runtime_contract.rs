@@ -43,6 +43,60 @@ async fn two_real_devices_serialize_independently_and_report_after_acceptance() 
 }
 
 #[tokio::test]
+async fn segment_lookup_survives_observations_and_schedules_from_latest_position() {
+    let mut fixture = Fixture::start_with_deferred_segments().await;
+    let (shutdown, service) = launch(&fixture, fixture.config(&["screen-a"]));
+    fixture.subscribed("screen-a").await;
+    fixture
+        .events("screen-a", vec![now_playing("video-a", 20.0, 1)])
+        .await;
+    let lookup = loop {
+        let request = fixture.next().await;
+        if request.path.contains("skipSegments/") {
+            break request;
+        }
+        assert!(request.command().is_none());
+    };
+    assert!(lookup.reply.is_some());
+
+    for (position, playback_state, speed) in [(12.0, 2, "2"), (1.0, 1, "0.01")] {
+        fixture
+            .events(
+                "screen-a",
+                vec![
+                    state(position, playback_state),
+                    now_playing("video-a", position, playback_state),
+                    json!(["onPlaybackSpeedChanged", {"playbackSpeed":speed}]),
+                ],
+            )
+            .await;
+        // This command proves all preceding observations were reduced while
+        // the original lookup was still waiting on its oneshot response.
+        let marker = fixture.next().await;
+        assert_eq!(marker.command(), Some("getNowPlaying"));
+    }
+
+    lookup.respond(200);
+    let seek = fixture.next().await;
+    assert_eq!(seek.command(), Some("seekTo"));
+    assert_eq!(seek.form["req0_newTime"], "5");
+    seek.respond(200);
+    assert!(fixture.next().await.path.contains("viewedVideoSponsorTime"));
+
+    // Completed metadata also survives later observations. Rewind after
+    // observing the seek target, and require another seek without a lookup.
+    fixture
+        .events("screen-a", vec![state(5.0, 2), state(1.0, 1)])
+        .await;
+    let seek = fixture.next().await;
+    assert_eq!(seek.command(), Some("seekTo"));
+    assert_eq!(seek.form["req0_newTime"], "5");
+    seek.respond(200);
+    assert!(fixture.next().await.path.contains("viewedVideoSponsorTime"));
+    finish(fixture, shutdown, service).await;
+}
+
+#[tokio::test]
 async fn successful_seek_stays_suppressed_until_target_observation_then_rewind() {
     let mut fixture = Fixture::start(true).await;
     let (shutdown, service) = launch(&fixture, fixture.config(&["screen-a"]));

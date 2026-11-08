@@ -2,7 +2,7 @@
 //! and joined before terminal restoration; no task may edit the draft directly.
 use super::{
     SetupError,
-    cli::api_for,
+    cli::{api_for, api_settings},
     state::{
         Action, CREDENTIALS_URL, FoundDevice, Request, Screen, SetupEffect, SetupEvent, SetupState,
         reduce,
@@ -10,6 +10,7 @@ use super::{
     widgets::{Edit, Surface, render},
 };
 use crate::{
+    api::ApiClient,
     config::{ConfigDocument, ConfigStore, SaveOutcome},
     discovery::{Discovery, DiscoveryEvent, DiscoveryMode},
     http::{Endpoints, HttpClients},
@@ -109,6 +110,42 @@ impl Drop for Jobs {
     }
 }
 
+// Driver-owned, not reducer state: clones share the client's bounded API caches.
+// Endpoints and tracing are fixed for this setup run. Only api_for's draft
+// inputs are compared, lazily when an API effect executes.
+struct SetupApi {
+    endpoints: Endpoints,
+    http_tracing: bool,
+    cached: Option<(String, bool, ApiClient)>,
+}
+
+impl SetupApi {
+    fn new(endpoints: Endpoints, http_tracing: bool) -> Self {
+        Self {
+            endpoints,
+            http_tracing,
+            cached: None,
+        }
+    }
+
+    fn get(&mut self, document: &ConfigDocument) -> Result<ApiClient, SetupError> {
+        let settings = api_settings(document);
+        if let Ok((apikey, use_proxy)) = settings.as_ref()
+            && let Some((cached_key, cached_proxy, api)) = &self.cached
+            && cached_key.as_str() == *apikey
+            && cached_proxy == use_proxy
+        {
+            return Ok(api.clone());
+        }
+        // Drop old credentials/results even if the replacement cannot be built.
+        self.cached = None;
+        let (apikey, use_proxy) = settings?;
+        let api = api_for(document, self.endpoints.clone(), self.http_tracing)?;
+        self.cached = Some((apikey.to_owned(), use_proxy, api.clone()));
+        Ok(api)
+    }
+}
+
 /// Constructor endpoints are a test seam, never a production endpoint override.
 pub async fn run(
     store: &ConfigStore,
@@ -127,6 +164,7 @@ pub async fn run(
     let (sender, mut receiver) = mpsc::channel(64);
     let mut state = SetupState::new(document);
     let mut jobs = Jobs::default();
+    let mut api = SetupApi::new(endpoints.clone(), http_tracing);
     let mut browser_failed = false;
     let result: Result<(), SetupError> = async {
         loop {
@@ -161,7 +199,7 @@ pub async fn run(
                     }
                     SetupEffect::Pair { stamp, code } => {
                         jobs.stop(Request::Pair).await;
-                        match api_for(&state.draft, endpoints.clone(), http_tracing) {
+                        match api.get(&state.draft) {
                             Err(error) => { effects.extend(reduce(&mut state, SetupEvent::PairResult(stamp, Err(error.to_string())))); }
                             Ok(api) => {
                                 let cancel = CancellationToken::new(); let child = cancel.clone(); let sender = sender.clone();
@@ -175,7 +213,7 @@ pub async fn run(
                     }
                     SetupEffect::Search { stamp, query } => {
                         jobs.stop(Request::Search).await;
-                        match api_for(&state.draft, endpoints.clone(), http_tracing) {
+                        match api.get(&state.draft) {
                             Err(error) => { effects.extend(reduce(&mut state, SetupEvent::SearchResult(stamp, Err(error.to_string())))); }
                             Ok(api) => {
                                 let cancel = CancellationToken::new(); let child = cancel.clone(); let sender = sender.clone();
@@ -342,5 +380,200 @@ pub fn translate(event: Event, state: &SetupState, surface: &Surface) -> Option<
         // Returning a no-op event ensures a resize immediately redraws geometry.
         Event::Resize(_, _) => Some(SetupEvent::Focus(state.focus)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    use url::Url;
+
+    struct SearchFixture {
+        endpoints: Endpoints,
+        requests: mpsc::Receiver<Url>,
+        server: JoinHandle<()>,
+    }
+
+    impl SearchFixture {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+            let endpoints = Endpoints {
+                youtube: base.join("youtube/").unwrap(),
+                lounge: base.join("lounge/").unwrap(),
+                sponsorblock: base.join("sponsorblock/").unwrap(),
+            };
+            let (sender, requests) = mpsc::channel(32);
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    loop {
+                        let mut chunk = [0; 1024];
+                        let count = socket.read(&mut chunk).await.unwrap();
+                        assert_ne!(count, 0, "request ended before headers");
+                        bytes.extend_from_slice(&chunk[..count]);
+                        if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                            break;
+                        }
+                        assert!(bytes.len() < 16384);
+                    }
+                    let request = std::str::from_utf8(&bytes).unwrap();
+                    let target = request.split_whitespace().nth(1).unwrap();
+                    let url = base.join(target).unwrap();
+                    let body = match url.path() {
+                        "/youtube/search" => {
+                            r#"{"items":[{"snippet":{"channelId":"channel-a","channelTitle":"Channel A"}}]}"#
+                        }
+                        "/youtube/channels" => {
+                            r#"{"items":[{"statistics":{"hiddenSubscriberCount":false,"subscriberCount":"1234"}}]}"#
+                        }
+                        _ => panic!("unexpected request path"),
+                    };
+                    sender.send(url).await.unwrap();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            Self {
+                endpoints,
+                requests,
+                server,
+            }
+        }
+
+        fn batch(&mut self, key: &str) {
+            for path in ["/youtube/search", "/youtube/channels"] {
+                let request = self.requests.try_recv().expect("completed HTTP request");
+                assert_eq!(request.path(), path);
+                assert!(
+                    request
+                        .query_pairs()
+                        .any(|(name, value)| name == "key" && value == key)
+                );
+            }
+            assert!(self.requests.try_recv().is_err(), "unexpected HTTP request");
+        }
+
+        async fn stop(mut self) {
+            self.server.abort();
+            let _ = (&mut self.server).await;
+        }
+    }
+
+    impl Drop for SearchFixture {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_setup_search_reuses_http_results_until_client_options_change() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut fixture = SearchFixture::start().await;
+            let mut clients = SetupApi::new(fixture.endpoints.clone(), false);
+            let mut document: ConfigDocument = serde_json::from_value(json!({
+                "apikey": "first-fixture-key",
+                "use_proxy": false
+            }))
+            .unwrap();
+            let first = clients
+                .get(&document)
+                .unwrap()
+                .search_channels("same query")
+                .await
+                .unwrap();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].subscribers, "1_234");
+            fixture.batch("first-fixture-key");
+
+            // These settings are not inputs to setup's api_for constructor.
+            document
+                .0
+                .insert("devices".into(), json!([{"name": "Edited"}]));
+            document
+                .0
+                .insert("channel_whitelist".into(), json!(["channel-a"]));
+            document.0.insert(
+                "sponsorblock_api_url".into(),
+                json!("https://example.invalid/api/"),
+            );
+            for _ in 0..2 {
+                assert_eq!(
+                    clients
+                        .get(&document)
+                        .unwrap()
+                        .search_channels("same query")
+                        .await
+                        .unwrap(),
+                    first
+                );
+            }
+            assert!(fixture.requests.try_recv().is_err());
+
+            document
+                .0
+                .insert("apikey".into(), json!("second-fixture-key"));
+            assert_eq!(
+                clients
+                    .get(&document)
+                    .unwrap()
+                    .search_channels("same query")
+                    .await
+                    .unwrap(),
+                first
+            );
+            fixture.batch("second-fixture-key");
+
+            // Returning to an old key must not resurrect a previous client's cache.
+            document
+                .0
+                .insert("apikey".into(), json!("first-fixture-key"));
+            clients
+                .get(&document)
+                .unwrap()
+                .search_channels("same query")
+                .await
+                .unwrap();
+            fixture.batch("first-fixture-key");
+
+            // Do not send HTTP through ambient proxies. Even if proxy construction
+            // fails, changing network options must discard the old cached client.
+            document.0.insert("use_proxy".into(), json!(true));
+            let _ = clients.get(&document);
+            document.0.insert("use_proxy".into(), json!(false));
+            clients
+                .get(&document)
+                .unwrap()
+                .search_channels("same query")
+                .await
+                .unwrap();
+            fixture.batch("first-fixture-key");
+
+            document.0.insert("apikey".into(), json!(42));
+            assert!(clients.get(&document).is_err());
+            document
+                .0
+                .insert("apikey".into(), json!("first-fixture-key"));
+            clients
+                .get(&document)
+                .unwrap()
+                .search_channels("same query")
+                .await
+                .unwrap();
+            fixture.batch("first-fixture-key");
+            fixture.stop().await;
+        })
+        .await
+        .expect("setup HTTP regression timed out");
     }
 }

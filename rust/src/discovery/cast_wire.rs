@@ -70,6 +70,8 @@ pub enum CastError {
     Json,
     #[error("Cast receiver refused application launch")]
     Launch,
+    #[error("Cast screen ID is empty or exceeds 256 bytes")]
+    Identity,
 }
 
 impl CastMessage {
@@ -363,6 +365,7 @@ async fn negotiate_inner<S: AsyncRead + AsyncWrite + Unpin, F: FnMut() -> bool>(
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                 {
+                    super::validate_screen_id(id).map_err(|_| CastError::Identity)?;
                     return Ok(Some(id.to_owned()));
                 }
             }

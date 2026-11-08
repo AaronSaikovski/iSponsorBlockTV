@@ -846,7 +846,9 @@ pub(crate) async fn probe(
             };
             let mut failed = false;
             for address in source.addresses {
-                if !unicast(address.ip()) {
+                if !unicast(address.ip())
+                    && !(context.policy.allow_loopback && address.ip().is_loopback())
+                {
                     continue;
                 }
                 let claims = context.claimed_endpoints.clone();
@@ -902,6 +904,209 @@ pub(crate) async fn probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use tokio::task::JoinSet;
+
+    mod identity {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/cast_identity.rs"
+        ));
+    }
+
+    async fn peer_request<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Value {
+        use tokio::io::AsyncReadExt;
+        let size = stream.read_u32().await.unwrap() as usize;
+        assert!(size <= cast_wire::MAX_FRAME);
+        let mut bytes = vec![0; size];
+        stream.read_exact(&mut bytes).await.unwrap();
+        let mut decoder = cast_wire::FrameDecoder::default();
+        decoder.push(&(size as u32).to_be_bytes()).unwrap();
+        decoder.push(&bytes).unwrap();
+        decoder.next_frame().unwrap().unwrap().payload().unwrap()
+    }
+
+    async fn refreshed_result_limit(name_bytes: usize, id_bytes: usize) {
+        use super::super::{
+            Discovery, DiscoveryEvent, MAX_DISCOVERY_RESULT_BYTES, MAX_DISCOVERY_RESULTS,
+        };
+        use crate::api::{ApiClient, ApiOptions};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            time::timeout,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let per_result = name_bytes + 2 * id_bytes;
+        let count = MAX_DISCOVERY_RESULTS.min(MAX_DISCOVERY_RESULT_BYTES / per_result);
+        let extra =
+            count < MAX_DISCOVERY_RESULTS && count * per_result < MAX_DISCOVERY_RESULT_BYTES;
+        let (completed_tx, mut completed) = mpsc::channel(1);
+        let server = tokio::spawn(async move {
+            let acceptor = identity::acceptor();
+            for attempt in 0..count + usize::from(extra) + 1 {
+                let index = attempt.saturating_sub(1);
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(socket).await.unwrap();
+                assert_eq!(peer_request(&mut stream).await["type"], "CONNECT");
+                assert_eq!(peer_request(&mut stream).await["type"], "GET_STATUS");
+                let status = cast_wire::CastMessage::json(
+                    "receiver-0",
+                    "sender-0",
+                    cast_wire::RECEIVER,
+                    json!({"type":"RECEIVER_STATUS","status":{"applications":[{
+                        "transportId":"fixture","namespaces":[{"name":cast_wire::MDX}]
+                    }]}}),
+                );
+                stream.write_all(&status.framed().unwrap()).await.unwrap();
+                assert_eq!(peer_request(&mut stream).await["type"], "CONNECT");
+                let request = peer_request(&mut stream).await;
+                assert_eq!(request["type"], "getMdxSessionStatus");
+                let status = cast_wire::CastMessage::json(
+                    "fixture",
+                    "sender-0",
+                    cast_wire::MDX,
+                    json!({"type":"mdxSessionStatus","requestId":request["requestId"],
+                        "data":{"screenId":format!("{index:0id_bytes$}")}}),
+                );
+                stream.write_all(&status.framed().unwrap()).await.unwrap();
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap_or(0), 0);
+                completed_tx.send(()).await.unwrap();
+            }
+        });
+        let api = ApiClient::new(ApiOptions::default(), crate::http::Endpoints::default()).unwrap();
+        let SocketAddr::V4(target) = address else {
+            unreachable!("IPv4 fixture")
+        };
+        let mut context =
+            Discovery::loopback(api, HttpClients::new(false, false).unwrap(), target).context;
+        context.mode = DiscoveryMode::PassiveContinuous;
+        let cancel = CancellationToken::new();
+        let collector_cancel = cancel.child_token();
+        let (tx, rx) = mpsc::channel(4);
+        let (output, mut events) = mpsc::channel(64);
+        let worker = tokio::spawn(super::super::run_coordinator(
+            context,
+            cancel,
+            output,
+            Instant::now(),
+            rx,
+            collector_cancel,
+            JoinSet::new(),
+        ));
+        let mut registry = registry();
+        let uuid = "one-refreshed-receiver".to_owned();
+        let mut device = Device::default();
+        device.mdns.insert(
+            "fixture-service".into(),
+            Source {
+                name: "n".repeat(name_bytes),
+                addresses: vec![address],
+            },
+        );
+        registry.devices.insert(uuid.clone(), device);
+        let registry = Arc::new(Mutex::new(registry));
+        for attempt in 0..count + usize::from(extra) + 1 {
+            let index = attempt.saturating_sub(1);
+            assert!(admit(&tx, &registry, Work::Mdx(uuid.clone()), attempt != 0).await);
+            timeout(Duration::from_secs(5), completed.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if attempt == 1 {
+                // The probe has closed its stream; the coordinator drains ready
+                // probe results before this collector-event barrier.
+                tx.send(BackendEvent::Warning {
+                    backend: "Fixture",
+                    message: "duplicate probe completed",
+                })
+                .await
+                .unwrap();
+                assert!(
+                    matches!(
+                        timeout(Duration::from_secs(5), events.recv())
+                            .await
+                            .unwrap(),
+                        Some(DiscoveryEvent::BackendWarning {
+                            backend: "Fixture",
+                            ..
+                        })
+                    ),
+                    "a refreshed duplicate must not emit or consume result budget"
+                );
+                continue;
+            }
+            if index < count {
+                let event = timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .unwrap();
+                let Some(DiscoveryEvent::Device(device)) = event else {
+                    panic!("expected refreshed device, got {event:?}");
+                };
+                assert_eq!(device.screen_id, format!("{index:0id_bytes$}"));
+                assert_eq!(device.name.len(), name_bytes);
+            }
+        }
+        let event = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, Some(DiscoveryEvent::BackendWarning { backend: "Discovery", message })
+            if message.contains("retention limit") && message.contains("session ended"))
+        );
+        assert!(matches!(
+            events.recv().await,
+            Some(DiscoveryEvent::Complete)
+        ));
+        assert!(events.recv().await.is_none(), "no results after exhaustion");
+        assert!(tx.is_closed(), "budget exhaustion must close admissions");
+        worker.await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_cast_refreshes_cannot_bypass_session_result_count() {
+        refreshed_result_limit(16, 8).await;
+    }
+
+    #[tokio::test]
+    async fn successful_cast_refreshes_cannot_bypass_retained_name_and_identity_bytes() {
+        refreshed_result_limit(2048, 256).await;
+    }
+
+    #[tokio::test]
+    async fn production_cast_probe_does_not_connect_to_loopback() {
+        use crate::api::{ApiClient, ApiOptions};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut registry = registry();
+        let mut device = Device::default();
+        device.mdns.insert(
+            "fixture".into(),
+            Source {
+                name: "Fixture".into(),
+                addresses: vec![listener.local_addr().unwrap()],
+            },
+        );
+        registry.devices.insert("fixture".into(), device);
+        let (tx, _rx) = mpsc::channel(1);
+        let candidate = Candidate {
+            work: Work::Mdx("fixture".into()),
+            registry: Arc::new(Mutex::new(registry)),
+            tx,
+        };
+        let api = ApiClient::new(ApiOptions::default(), crate::http::Endpoints::default()).unwrap();
+        let context =
+            super::super::Discovery::new(api, HttpClients::new(false, false).unwrap()).context;
+        assert!(probe(candidate, &context).await.unwrap().is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+    }
 
     fn registry() -> Registry {
         Registry {

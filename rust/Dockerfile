@@ -29,6 +29,7 @@ FROM scratch
 COPY --from=compiler /out/iSponsorBlockTV /app/iSponsorBlockTV
 COPY --from=compiler /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY LICENSE.md /app/LICENSE.md
+COPY rust/THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     iSPBTV_data_dir=/app/data \
     iSPBTV_docker=True \
