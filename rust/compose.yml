@@ -1,0 +1,7 @@
+services:
+  isponsorblocktv-rust:
+    image: ${ISPBTV_RUST_IMAGE:-ghcr.io/dmunozv04/isponsorblocktv-rust:latest}
+    container_name: isponsorblocktv-rust
+    restart: unless-stopped
+    volumes:
+      - ${ISPBTV_RUST_DATA_DIR:-./data}:/app/data

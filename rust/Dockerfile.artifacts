@@ -1,0 +1,14 @@
+FROM scratch
+ARG TARGETARCH
+ARG TARGETVARIANT
+COPY dist/${TARGETARCH}/${TARGETVARIANT}/iSponsorBlockTV /app/iSponsorBlockTV
+COPY dist/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY dist/LICENSE.md /app/LICENSE.md
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    iSPBTV_data_dir=/app/data \
+    iSPBTV_docker=True \
+    TERM=xterm-256color \
+    COLORTERM=truecolor
+WORKDIR /app/data
+WORKDIR /app
+ENTRYPOINT ["/app/iSponsorBlockTV"]

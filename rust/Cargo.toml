@@ -1,0 +1,56 @@
+[package]
+name = "isponsorblocktv"
+version = "2.11.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "GPL-3.0-only"
+description = "Native SponsorBlock companion for YouTube TV"
+repository = "https://github.com/dmunozv04/iSponsorBlockTV"
+
+[lib]
+name = "isponsorblocktv"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iSponsorBlockTV"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.48.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["native-tls-vendored", "json", "stream", "gzip"] }
+native-tls = { version = "0.2.14", default-features = false, features = ["vendored"] }
+tokio-native-tls = { version = "0.3.1", default-features = false, features = ["vendored"] }
+ratatui = { version = "0.29.0", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+mdns-sd = { version = "0.21.6", default-features = false, features = ["async", "logging"] }
+if-addrs = { version = "0.15.0", features = ["link-local"] }
+socket2 = "0.6"
+quick-xml = { version = "0.38.4", default-features = false, features = ["encoding"] }
+prost = { version = "0.14.1", default-features = false, features = ["derive", "std"] }
+clap = { version = "4.5.50", features = ["derive", "env"] }
+serde = { version = "1.0.228", features = ["derive"] }
+tempfile = "3.23.0"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+lru = "0.12"
+url = "2"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+webbrowser = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_System_Console", "Win32_Security"] }
+
+[dev-dependencies]
+tokio = { version = "1.48.0", default-features = false, features = ["test-util"] }
