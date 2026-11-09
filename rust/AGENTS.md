@@ -1,4 +1,4 @@
-# Repository Guidelines
+# isponsorblocktvrust Repository Guidelines
 
 ## Project Overview
 
@@ -6,6 +6,12 @@ This directory is the standalone native Rust implementation of iSponsorBlockTV:
 a self-hosted companion for YouTube TV that skips SponsorBlock segments, controls
 ads/autoplay, and provides terminal device setup. It does not invoke Python.
 Parent Python tooling and its lack of automated tests do not apply here.
+
+The executable is `isponsorblocktvrust` (`isponsorblocktvrust.exe` on Windows);
+the Cargo package is `isponsorblocktvrust`, and the library import remains
+`isponsorblocktv`. Preserve existing config
+locations, environment variable names, Lounge `join_name`, repository URLs, and
+Docker image/service names when changing executable references.
 
 ## Architecture & Data Flow
 

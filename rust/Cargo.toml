@@ -1,5 +1,5 @@
 [package]
-name = "isponsorblocktv"
+name = "isponsorblocktvrust"
 version = "2.11.0"
 edition = "2024"
 rust-version = "1.99.1"
@@ -12,7 +12,7 @@ name = "isponsorblocktv"
 path = "src/lib.rs"
 
 [[bin]]
-name = "iSponsorBlockTV"
+name = "isponsorblocktvrust"
 path = "src/main.rs"
 
 [dependencies]

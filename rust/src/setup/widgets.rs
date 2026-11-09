@@ -212,7 +212,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut SetupState) -> Surface {
         };
     }
     let title = format!(
-        " iSponsorBlockTV / {}{} ",
+        " isponsorblocktvrust / {}{} ",
         state.title(),
         if state.dirty() { " / unsaved" } else { "" }
     );

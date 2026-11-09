@@ -275,6 +275,13 @@ external data flow in the diagram above also apply to the native implementation;
 the ownership and failure semantics below replace the Python-specific internals,
 not the video-delivery path.
 
+The native executable is `isponsorblocktvrust` (`isponsorblocktvrust.exe` on
+Windows); the Cargo package is `isponsorblocktvrust`, while the library import
+remains `isponsorblocktv`. Native release
+archives use `isponsorblocktvrust-<version>-<target>` with `.tar.gz` on Unix or
+`.zip` on Windows. Existing configuration locations, environment variable names,
+Lounge `join_name`, and Docker image/service names are unchanged.
+
 ### Composition and ownership
 
 - **`src/main.rs`, `cli.rs`, and `lib.rs`:** a thin executable captures environment,

@@ -107,12 +107,12 @@ jobs:
             echo 'Pinned cross preparation failed; refusing to evaluate its output.' >&2
             exit 1
           fi
-          cross build --locked --release --target "$TARGET" --bin iSponsorBlockTV
+          cross build --locked --release --target "$TARGET" --bin isponsorblocktvrust
 
       - name: Build native Windows or macOS target
         if: runner.os != 'Linux'
         working-directory: rust
-        run: rustup run "$RUST_TOOLCHAIN" cargo build --locked --release --target "$TARGET" --bin iSponsorBlockTV
+        run: rustup run "$RUST_TOOLCHAIN" cargo build --locked --release --target "$TARGET" --bin isponsorblocktvrust
 
       - name: Verify Linux ELF has no dynamic loader or dependencies
         if: runner.os == 'Linux'
@@ -122,7 +122,7 @@ jobs:
           from pathlib import Path
           import subprocess
 
-          binary = Path('rust/target') / os.environ['TARGET'] / 'release/iSponsorBlockTV'
+          binary = Path('rust/target') / os.environ['TARGET'] / 'release/isponsorblocktvrust'
           details = subprocess.check_output(
               ['readelf', '--file-header', '--program-headers', '--dynamic', '--wide', str(binary)],
               text=True,
@@ -142,7 +142,7 @@ jobs:
           from pathlib import Path
           import subprocess
 
-          name = 'iSponsorBlockTV.exe' if os.name == 'nt' else 'iSponsorBlockTV'
+          name = 'isponsorblocktvrust.exe' if os.name == 'nt' else 'isponsorblocktvrust'
           binary = Path('rust/target') / os.environ['TARGET'] / 'release' / name
           subprocess.run([str(binary), '--version'], check=True)
           PY
@@ -157,13 +157,13 @@ jobs:
 
           target = os.environ['TARGET']
           version = os.environ['VERSION']
-          name = 'iSponsorBlockTV.exe' if os.name == 'nt' else 'iSponsorBlockTV'
+          name = 'isponsorblocktvrust.exe' if os.name == 'nt' else 'isponsorblocktvrust'
           binary = Path('rust/target') / target / 'release' / name
           license_file = Path('LICENSE.md')
           notices = Path('rust/THIRD_PARTY_NOTICES.md')
           output = Path('dist')
           output.mkdir()
-          stem = f'iSponsorBlockTV-rust-{version}-{target}'
+          stem = f'isponsorblocktvrust-{version}-{target}'
           if os.name == 'nt':
               with zipfile.ZipFile(output / f'{stem}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
                   archive.write(binary, arcname=name)

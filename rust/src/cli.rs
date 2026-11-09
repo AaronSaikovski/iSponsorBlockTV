@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 /// Native SponsorBlock companion for YouTube TV.
 #[derive(Debug, Parser)]
-#[command(name = "iSponsorBlockTV", version)]
+#[command(name = "isponsorblocktvrust", version)]
 pub struct Cli {
     #[arg(short = 'd', long, global = true)]
     pub data: Option<PathBuf>,

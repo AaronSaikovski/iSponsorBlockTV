@@ -16,7 +16,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_iSponsorBlockTV"))
+    Command::new(env!("CARGO_BIN_EXE_isponsorblocktvrust"))
 }
 
 #[test]

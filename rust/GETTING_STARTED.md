@@ -1,8 +1,14 @@
-# Getting started with native Rust iSponsorBlockTV
+# Getting started with isponsorblocktvrust
 
 Pair your TV's YouTube app, save its configuration, then leave the companion
 running while you watch. Choose **local Rust** or **Docker** below; both use the
 same pairing prompts and configuration format. Use only one controller per TV.
+
+The native executable is `isponsorblocktvrust` (`isponsorblocktvrust.exe` on
+Windows). Its Cargo package is `isponsorblocktvrust`; the library import remains
+`isponsorblocktv`. Existing config
+locations, environment variables, and Docker image/service names are unchanged;
+renaming the executable does not require moving configuration.
 
 A YouTube API key is not needed for pairing or ordinary SponsorBlock skipping.
 It is needed for the channel whitelist. Internet access to YouTube and
@@ -59,13 +65,13 @@ cargo run --locked --release -- --data ./data start
 Or run the already-built executable without Cargo:
 
 ```sh
-./target/release/iSponsorBlockTV --data ./data start
+./target/release/isponsorblocktvrust --data ./data start
 ```
 
 In Windows PowerShell:
 
 ```powershell
-.\target\release\iSponsorBlockTV.exe --data .\data start
+.\target\release\isponsorblocktvrust.exe --data .\data start
 ```
 
 The service runs in the foreground; leave it running while watching TV. Info-level
@@ -92,7 +98,7 @@ editing configuration underneath a running controller; restart to load changes.
 ### Use a release binary instead
 
 After a native release is published, download the matching
-`iSponsorBlockTV-rust-<version>-<target>` archive and `SHA256SUMS-rust.txt` from
+`isponsorblocktvrust-<version>-<target>` archive and `SHA256SUMS-rust.txt` from
 this repository's GitHub release. Match both OS and CPU architecture. Unix
 archives are `.tar.gz`; Windows archives are `.zip`. They include the executable,
 license and third-party notices; keep these together when redistributing.
@@ -101,8 +107,9 @@ No Python or Rust compiler is required to run them.
 Verify the downloaded archive against its entry in the checksum file, then
 extract it. Linux can use `sha256sum <archive>`; macOS can use
 `shasum -a 256 <archive>`; PowerShell can use `Get-FileHash <archive> -Algorithm SHA256`.
-Run the extracted executable with `--data ./data setup-cli`, then with
-`--data ./data start`. Host TLS trust certificates are still required on Linux.
+Run the extracted `isponsorblocktvrust` (`isponsorblocktvrust.exe` on Windows)
+with `--data ./data setup-cli`, then with `--data ./data start`. Host TLS trust
+certificates are still required on Linux.
 Availability depends on a successful release workflow; a configured workflow is
 not evidence that a downloadable release already exists.
 

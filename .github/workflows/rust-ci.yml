@@ -55,13 +55,13 @@ jobs:
       - name: Test
         run: cargo test --locked
       - name: Build release executable
-        run: cargo build --locked --release --bin iSponsorBlockTV
+        run: cargo build --locked --release --bin isponsorblocktvrust
       - name: Smoke test executable
         run: |
           if [[ "$RUNNER_OS" == Windows ]]; then
-            target/release/iSponsorBlockTV.exe --version
+            target/release/isponsorblocktvrust.exe --version
           else
-            target/release/iSponsorBlockTV --version
+            target/release/isponsorblocktvrust --version
           fi
 
   container:

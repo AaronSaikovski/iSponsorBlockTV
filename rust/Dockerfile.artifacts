@@ -1,7 +1,7 @@
 FROM scratch
 ARG TARGETARCH
 ARG TARGETVARIANT
-COPY dist/${TARGETARCH}/${TARGETVARIANT}/iSponsorBlockTV /app/iSponsorBlockTV
+COPY dist/${TARGETARCH}/${TARGETVARIANT}/isponsorblocktvrust /app/isponsorblocktvrust
 COPY dist/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY dist/LICENSE.md /app/LICENSE.md
 COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
@@ -12,4 +12,4 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     COLORTERM=truecolor
 WORKDIR /app/data
 WORKDIR /app
-ENTRYPOINT ["/app/iSponsorBlockTV"]
+ENTRYPOINT ["/app/isponsorblocktvrust"]

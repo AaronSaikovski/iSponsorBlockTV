@@ -22,7 +22,7 @@ pub async fn run(
 ) -> Result<SetupOutcome, SetupError> {
     prompt
         .write(
-            "Welcome to the iSponsorBlockTV cli setup wizard\n",
+            "Welcome to the isponsorblocktvrust cli setup wizard\n",
             &shutdown,
         )
         .await?;

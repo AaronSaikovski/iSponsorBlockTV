@@ -1,4 +1,4 @@
-# iSponsorBlockTV — Native Rust
+# isponsorblocktvrust — Native Rust
 
 A standalone, self-hosted companion for YouTube TV apps. It uses SponsorBlock to
 skip sponsored segments and supports ad muting/skipping, autoplay control, and
@@ -7,6 +7,11 @@ terminal-based device configuration. No Python runtime is required.
 This directory contains the native Rust implementation. The [parent README](../README.md)
 primarily documents the Python implementation; its tooling and compatibility claims
 should not be treated as native Rust certification.
+
+The executable is `isponsorblocktvrust` (`isponsorblocktvrust.exe` on Windows).
+The Cargo package is also `isponsorblocktvrust`; the library import remains
+`isponsorblocktv`. Existing configuration
+locations, environment variable names, and Docker image/service names are unchanged.
 
 ## Requirements
 
@@ -29,8 +34,8 @@ Run these commands from this directory (`rust/`):
 
 ```sh
 cargo build --locked --release
-./target/release/iSponsorBlockTV --data ./data setup
-./target/release/iSponsorBlockTV --data ./data start
+./target/release/isponsorblocktvrust --data ./data setup
+./target/release/isponsorblocktvrust --data ./data start
 ```
 
 On Windows, the executable has an `.exe` suffix. Use `setup-cli` instead of `setup`
@@ -240,7 +245,7 @@ Linux, Windows and macOS, and builds/smoke-tests the AMD64 Docker image.
 release with a `v`-prefixed tag is published. It verifies that the tag is exactly
 `v` plus the version in `rust/Cargo.toml`, then requires Rust CI before publishing:
 
-- Archives named `iSponsorBlockTV-rust-<version>-<target>.tar.gz` (Unix) or `.zip`
+- Archives named `isponsorblocktvrust-<version>-<target>.tar.gz` (Unix) or `.zip`
   (Windows), containing the executable, license and `THIRD_PARTY_NOTICES.md`,
   plus `SHA256SUMS-rust.txt`.
 - Linux musl targets: x86_64, aarch64, i686, ARMv7 and ARMv6; macOS targets:

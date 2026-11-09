@@ -15,18 +15,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eu; \
     target="$(rustc -vV | sed -n 's/^host: //p')"; \
     RUSTFLAGS="-C target-feature=+crt-static" \
-        cargo build --locked --release --target "$target" --bin iSponsorBlockTV; \
+        cargo build --locked --release --target "$target" --bin isponsorblocktvrust; \
     mkdir -p /out; \
-    cp "target/$target/release/iSponsorBlockTV" /out/iSponsorBlockTV; \
-    strip --strip-all /out/iSponsorBlockTV; \
-    readelf -l -d /out/iSponsorBlockTV > /out/elf.txt; \
+    cp "target/$target/release/isponsorblocktvrust" /out/isponsorblocktvrust; \
+    strip --strip-all /out/isponsorblocktvrust; \
+    readelf -l -d /out/isponsorblocktvrust > /out/elf.txt; \
     if grep -Eq 'INTERP|NEEDED' /out/elf.txt; then \
         cat /out/elf.txt; exit 1; \
     fi; \
-    /out/iSponsorBlockTV --version
+    /out/isponsorblocktvrust --version
 
 FROM scratch
-COPY --from=compiler /out/iSponsorBlockTV /app/iSponsorBlockTV
+COPY --from=compiler /out/isponsorblocktvrust /app/isponsorblocktvrust
 COPY --from=compiler /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY LICENSE.md /app/LICENSE.md
 COPY rust/THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
@@ -37,4 +37,4 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     COLORTERM=truecolor
 WORKDIR /app/data
 WORKDIR /app
-ENTRYPOINT ["/app/iSponsorBlockTV"]
+ENTRYPOINT ["/app/isponsorblocktvrust"]
