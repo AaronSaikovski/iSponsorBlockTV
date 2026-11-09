@@ -14,7 +14,7 @@
     "skip_ads": true,
     "minimum_skip_length": 1,
     "auto_play": true,
-    "join_name": "iSponsorBlockTV",
+    "join_name": "iSponsorBlockTVRust",
     "apikey": "",
     "channel_whitelist": [
         {"id": "",

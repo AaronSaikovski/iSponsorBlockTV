@@ -124,6 +124,7 @@ impl Discovery {
             context: ProbeContext {
                 api,
                 http,
+                cast_transport: cast_wire::CastTransport::default(),
                 mode: DiscoveryMode::ActiveOnce,
                 policy: TransportPolicy {
                     allow_loopback: false,
@@ -264,6 +265,7 @@ pub(crate) enum BackendEvent {
 pub(crate) struct ProbeContext {
     pub api: ApiClient,
     pub http: HttpClients,
+    pub cast_transport: cast_wire::CastTransport,
     pub mode: DiscoveryMode,
     pub policy: TransportPolicy,
     // Prevent multiple advertisements from launching the same application URL.

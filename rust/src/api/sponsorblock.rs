@@ -19,7 +19,10 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 use super::{ApiClient, ApiError, ApiOptions};
-use crate::{config::RuntimeConfig, http::Endpoints};
+use crate::{
+    config::RuntimeConfig,
+    http::{Endpoints, HttpClients},
+};
 
 const SERVICE: &str = "SponsorBlock";
 const TTL: Duration = Duration::from_secs(300);
@@ -100,7 +103,31 @@ impl ApiService {
             },
             endpoints,
         )?;
-        Ok(Self {
+        Ok(Self::from_api(config, api))
+    }
+
+    /// Reuse the supplied transport policy; only API/service settings are read
+    /// from `config`, never its proxy setting. Each service gets fresh caches.
+    pub(crate) fn with_http(
+        config: &RuntimeConfig,
+        endpoints: Endpoints,
+        http: HttpClients,
+    ) -> Result<Self, ApiError> {
+        let api = ApiClient::from_http(
+            config.apikey.clone(),
+            config
+                .channel_whitelist
+                .iter()
+                .map(|channel| channel.id.clone())
+                .collect(),
+            endpoints.normalized()?,
+            http,
+        );
+        Ok(Self::from_api(config, api))
+    }
+
+    fn from_api(config: &RuntimeConfig, api: ApiClient) -> Self {
+        Self {
             state: Arc::new(State {
                 api,
                 categories: config.skip_categories.clone(),
@@ -111,7 +138,7 @@ impl ApiService {
                     in_flight: HashMap::new(),
                 }),
             }),
-        })
+        }
     }
 
     pub async fn segments(&self, video_id: &str) -> Result<Arc<[Segment]>, ApiError> {

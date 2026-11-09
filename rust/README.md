@@ -63,6 +63,13 @@ existing Python configuration, use a separate copy first. Setup preserves unknow
 JSON fields; startup separately validates the configuration. A nonempty channel
 whitelist requires a YouTube API key. Device offsets in JSON are milliseconds.
 
+For an editable starter, use [config.json.example](config.json.example) and the
+[starter configuration instructions](GETTING_STARTED.md#optional-start-from-the-sample-configuration).
+It matches runtime defaults: sponsor segments longer than one second, info logs,
+autoplay and viewed-segment reporting enabled, ad muting/skipping disabled, and
+no proxy or whitelist. Its device list is deliberately empty; pair and save
+before starting. Never overwrite an existing paired configuration with the sample.
+
 Treat configuration as sensitive: it contains device identifiers and may contain
 API credentials. Do not commit your data directory.
 
@@ -83,6 +90,53 @@ fields and restart to load the change. Locally, stop with Ctrl-C, edit the file
 in your `--data` directory, then rerun your start command. With Docker, run
 `docker compose stop`, edit `config.json` in the host data directory
 (`ISPBTV_RUST_DATA_DIR`, default `./data`), then `docker compose up -d`.
+
+### SponsorBlock skip categories
+
+`skip_categories` selects which community-marked sections **inside videos** to
+skip. Include only the categories you want:
+
+| Category | What gets skipped |
+| --- | --- |
+| `sponsor` | Paid promotions and sponsorship segments |
+| `selfpromo` | Promotion of the creator's own products, services, or channels |
+| `intro` | Intro sequences or opening animations |
+| `outro` | End credits and closing sequences |
+| `music_offtopic` | Non-music sections in music videos |
+| `interaction` | Requests to like, subscribe, comment, or otherwise interact |
+| `exclusive_access` | Promotion of memberships, Patreon, or other exclusive content |
+| `preview` | Recaps or previews of content |
+| `filler` | Tangents or jokes marked as unnecessary to understanding the main content |
+| `hook` | Opening teasers intended to draw viewers into the video |
+
+Enabling every category makes skipping fairly aggressive. A conservative starting
+point is the following fragment, merged into your existing configuration:
+
+```json
+{
+  "skip_categories": ["sponsor"]
+}
+```
+
+Skipping requires matching community-submitted segments and respects the minimum
+segment length and channel whitelist. An empty list (`[]`) disables SponsorBlock
+segment skipping. These categories do **not** control YouTube's separate
+advertisements; use `skip_ads` and `mute_ads` for those.
+
+### Proxy settings
+
+`use_proxy` defaults to `false`: cloud requests ignore proxy environment variables.
+Set it to `true` only when YouTube/SponsorBlock traffic needs your configured
+proxy. The application reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+`NO_PROXY` (with lowercase variants supported). Scheme-specific proxies take
+precedence over `ALL_PROXY`; `NO_PROXY` excludes destinations.
+
+This setting does not supply a proxy server, configure a VPN, or discover desktop
+proxy settings. DIAL and Cast LAN connections always bypass proxies, even when
+`use_proxy` is enabled. Restart after changing configuration or proxy environment.
+For Docker, pass the variables into both setup and service containers; exporting
+them in the host shell alone does not forward them through the supplied Compose
+file. Keep proxy credentials out of committed files and shared logs.
 
 ### Diagnostics
 
@@ -177,7 +231,7 @@ and documentation tests. Use `cargo test --locked -- --list` to inspect the inve
 | Contract suite (`tests/`) | Behavior protected |
 | --- | --- |
 | `config_contract` | Lossless JSON, validation, path precedence, atomic saves and failure recovery |
-| `cli_contract`, `setup_contract`, `tui_contract` | Native stdin cancellation with its pipe still open, explicit saves, pairing, stale results and terminal rendering |
+| `cli_contract`, `setup_contract`, `tui_contract` | Native stdin cancellation with its pipe still open, explicit saves, pairing, stale results, dynamic focus boundaries and terminal rendering |
 | `api_contract` | Request formats, cache isolation, proxy policy, the 1 MiB decompressed-body boundary, deadlines and secret redaction |
 | `sponsorblock_contract` | Segment merging, expiry, shared lookups, cancellation and reporting |
 | `lounge_contract` | Session identity, command ordering, streaming frames and interrupted reads |
@@ -186,17 +240,21 @@ and documentation tests. Use `cargo test --locked -- --list` to inspect the inve
 | `native_e2e` | Fixture-backed setup-to-playback application flow |
 
 Source-adjacent unit tests additionally cover scheduler boundaries, protocol
-parsing, discovery budgets, and setup-client reuse. Subprocess helper tests are
-driven by their parent tests to isolate native I/O and proxy environments.
+parsing, discovery budgets, setup-client reuse, and Cast metadata connection
+reuse, eviction, cancellation and receiver-route isolation (including IPv6 scope).
+Subprocess helper tests are driven by their parent tests to isolate native I/O
+and proxy environments.
 
-**Verification snapshot:** the test-coverage update passed locally on macOS ARM64
-with Rust 1.99.1: **221 tests passed, zero failed or ignored**, plus isolated
-subprocess checks. Clippy passed across all targets with warnings denied.
+**Verification snapshot:** the latest optimization update passed locally on
+macOS ARM64 with Rust 1.99.1: **230 tests passed, zero failed or ignored**, plus
+isolated subprocess checks. Clippy passed across all targets with warnings denied.
+A separate 100×24 real-terminal smoke check exercised setup rendering, End/Home
+navigation and clean exit without saving or starting discovery.
 Linux and Windows are configured in the CI matrix but were not executed as part
 of this local verification.
 
-These tests do not certify physical devices, live API behavior, LAN multicast,
-or real terminal lifecycle behavior. Verify those separately when changing the
+These checks do not certify physical devices, live API behavior, LAN multicast,
+or every interactive terminal flow. Verify those separately when changing the
 corresponding integration. There is no configured numerical coverage threshold.
 
 ### Dependency security
@@ -229,6 +287,9 @@ concurrent requests for the same video. A pure scheduler computes skip timing;
 serialized Lounge commands control the device. The TUI uses an event/reducer/effect
 model with stale-result guards, reusing API clients and cached channel searches
 until API-key or proxy settings change.
+Runtime API and Lounge transports share one policy-separated HTTP client bundle.
+Discovery reuses its Cast TLS connector and retains at most 16 destination-pinned
+metadata HTTP clients, keeping receiver routes isolated.
 
 | Location | Responsibility |
 | --- | --- |
@@ -243,6 +304,24 @@ until API-key or proxy settings change.
 
 See [repository guidelines](AGENTS.md) for implementation invariants and the
 [Rust architecture document](ARCHITECTURE.md) for ownership and data-flow details.
+
+### Runtime efficiency
+
+Session-presence checks avoid cloning protocol IDs. Setup focus queries traverse
+borrowed row descriptions instead of constructing every formatted label; rendering
+still creates the strings it displays.
+
+A temporary allocation probe on the default 24-row setup screen measured:
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Allocation/reallocation calls for 1,000 `focused_action()` queries | 50,000 | 0 |
+
+This is an allocation measurement, not a playback-speed or Raspberry Pi benchmark.
+The client reuse and allocation improvements are automatic: there are no new
+tuning flags, configuration migrations, or pairing requirements. Rebuild/restart
+a local installation or rebuild/recreate its Docker container to load the changes;
+keep the existing data directory.
 
 ### Linux cross-compilation
 

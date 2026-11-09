@@ -159,24 +159,6 @@ pub struct Row {
     pub field: Option<Field>,
     pub masked: bool,
 }
-impl Row {
-    pub fn button(label: impl Into<String>, action: Action) -> Self {
-        Self {
-            label: label.into(),
-            action,
-            field: None,
-            masked: false,
-        }
-    }
-    pub fn input(label: &str, field: Field, masked: bool) -> Self {
-        Self {
-            label: label.into(),
-            action: Action::Input(field),
-            field: Some(field),
-            masked,
-        }
-    }
-}
 #[derive(Clone, Debug)]
 pub struct Hit {
     pub area: Rect,

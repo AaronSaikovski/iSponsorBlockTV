@@ -317,7 +317,7 @@ pub fn translate(event: Event, state: &SetupState, surface: &Surface) -> Option<
                 }
                 KeyCode::Home if state.focused_field().is_none() => Some(SetupEvent::Focus(0)),
                 KeyCode::End if state.focused_field().is_none() => {
-                    Some(SetupEvent::Focus(state.rows().len().saturating_sub(1)))
+                    Some(SetupEvent::Focus(state.row_count().saturating_sub(1)))
                 }
                 KeyCode::PageUp => Some(SetupEvent::Move(-8)),
                 KeyCode::PageDown => Some(SetupEvent::Move(8)),

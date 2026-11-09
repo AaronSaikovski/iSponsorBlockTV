@@ -79,7 +79,8 @@ pub enum ApiError {
 }
 
 struct ApiState {
-    options: ApiOptions,
+    apikey: String,
+    channel_whitelist: Vec<String>,
     endpoints: Endpoints,
     http: HttpClients,
     searches: Mutex<LruCache<String, Vec<ChannelResult>>>,
@@ -95,9 +96,26 @@ impl ApiClient {
     pub fn new(options: ApiOptions, endpoints: Endpoints) -> Result<Self, ApiError> {
         let endpoints = endpoints.normalized()?;
         let http = HttpClients::new(options.use_proxy, options.http_tracing)?;
-        Ok(Self {
+        Ok(Self::from_http(
+            options.apikey,
+            options.channel_whitelist,
+            endpoints,
+            http,
+        ))
+    }
+
+    /// Endpoints must already be normalized. Transport policy belongs to `http`;
+    /// each construction gets independent immutable key/whitelist caches.
+    fn from_http(
+        apikey: String,
+        channel_whitelist: Vec<String>,
+        endpoints: Endpoints,
+        http: HttpClients,
+    ) -> Self {
+        Self {
             state: Arc::new(ApiState {
-                options,
+                apikey,
+                channel_whitelist,
                 endpoints,
                 http,
                 searches: Mutex::new(LruCache::new(
@@ -107,12 +125,12 @@ impl ApiClient {
                     NonZeroUsize::new(100).expect("nonzero capacity"),
                 )),
             }),
-        })
+        }
     }
 
     /// Whitelisting bypasses SponsorBlock only; cache errors are never decisions.
     pub async fn is_whitelisted(&self, video_id: &str) -> Result<bool, ApiError> {
-        if self.state.options.channel_whitelist.is_empty() {
+        if self.state.channel_whitelist.is_empty() {
             return Ok(false);
         }
         if let Some(result) = self
@@ -126,7 +144,7 @@ impl ApiClient {
             return Ok(result);
         }
         let channel = self.channel_for_video(video_id).await?;
-        let result = channel.is_some_and(|id| self.state.options.channel_whitelist.contains(&id));
+        let result = channel.is_some_and(|id| self.state.channel_whitelist.contains(&id));
         self.state
             .whitelist
             .lock()

@@ -136,6 +136,97 @@ fn missing_null_and_empty_categories_remain_distinct_until_edited() {
         assert_eq!(state.draft, before);
     }
 }
+
+#[test]
+fn focus_tracks_dynamic_rows_without_stale_category_or_result_indices() {
+    fn assert_focus_order(state: &mut SetupState) {
+        let (first, last) = match state.screen {
+            Screen::Main => (Action::AddDevice, Action::Exit),
+            Screen::AddDevice => (Action::DeviceTab(false), Action::Cancel),
+            Screen::AddChannel => (Action::ChannelTab(false), Action::Cancel),
+            _ => unreachable!(),
+        };
+        state.focus = usize::MAX;
+        assert_eq!(state.focused_action(), None);
+        assert_eq!(state.focused_field(), None);
+        reduce(state, SetupEvent::Focus(usize::MAX));
+        assert_eq!(state.focused_action(), Some(last.clone()));
+        reduce(state, SetupEvent::Move(1));
+        assert_eq!(state.focused_action(), Some(first));
+        let end = translate(
+            Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            state,
+            &Surface::default(),
+        )
+        .unwrap();
+        reduce(state, end);
+        assert_eq!(state.focused_action(), Some(last));
+    }
+
+    let mut state = state(json!({
+        "devices": [{"name": "界"}, {}, null],
+        "channel_whitelist": [{"id": "UCfallback"}, {}, null],
+        "skip_categories": ["future", "sponsor", "future", 7, null, "界", "intro"]
+    }));
+    let categories: Vec<_> = state
+        .rows()
+        .into_iter()
+        .filter_map(|row| match row.action {
+            Action::Category(category) => Some(category),
+            _ => None,
+        })
+        .collect();
+    let mut expected: Vec<_> = isponsorblocktv::setup::state::CATEGORIES
+        .iter()
+        .map(|category| (*category).to_owned())
+        .collect();
+    expected.extend(["future".into(), "界".into()]);
+    assert_eq!(categories, expected);
+    assert_focus_order(&mut state);
+    act(&mut state, Action::RemoveDevice(0));
+    act(&mut state, Action::RemoveChannel(1));
+    act(&mut state, Action::Category("future".into()));
+    assert_focus_order(&mut state);
+
+    // Public state mutations must be visible immediately, not after a render.
+    for categories in [json!(null), json!([]), json!(["new", "new", false])] {
+        state.draft.0.insert("skip_categories".into(), categories);
+        assert_focus_order(&mut state);
+    }
+    state.screen = Screen::AddDevice;
+    state.discovered = vec![
+        FoundDevice {
+            screen_id: "one".into(),
+            name: "界".into(),
+            selected: true,
+        },
+        FoundDevice {
+            screen_id: "two".into(),
+            name: "Second".into(),
+            selected: false,
+        },
+    ];
+    for lan_tab in [true, false, true] {
+        state.lan_tab = lan_tab;
+        assert_focus_order(&mut state);
+    }
+    state.discovered.clear();
+    assert_focus_order(&mut state);
+
+    state.screen = Screen::AddChannel;
+    state.channels = vec![ChannelResult {
+        id: "UCresult".into(),
+        name: "界".into(),
+        subscribers: "Hidden".into(),
+    }];
+    state.selected_channel = Some(0);
+    for manual_tab in [false, true, false] {
+        state.manual_tab = manual_tab;
+        assert_focus_order(&mut state);
+    }
+    state.channels.clear();
+    assert_focus_order(&mut state);
+}
 #[test]
 fn migration_requires_explicit_save_and_save_failure_keeps_draft() {
     let mut state = state(json!({"atvs":null,"unknown":7}));

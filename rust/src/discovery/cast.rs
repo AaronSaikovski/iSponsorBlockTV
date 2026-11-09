@@ -865,6 +865,7 @@ pub(crate) async fn probe(
                     true
                 };
                 let result = cast_wire::probe_with_permission(
+                    &context.cast_transport,
                     address,
                     context.mode == DiscoveryMode::ActiveOnce,
                     CancellationToken::new(),

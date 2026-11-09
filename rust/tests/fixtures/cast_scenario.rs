@@ -3,7 +3,7 @@ mod identity;
 pub use identity::acceptor;
 
 use isponsorblocktv::discovery::cast_wire::{
-    self, CONNECTION, CastMessage, FrameDecoder, MAX_FRAME, MDX, RECEIVER,
+    self, CONNECTION, CastMessage, CastTransport, FrameDecoder, MAX_FRAME, MDX, RECEIVER,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -97,9 +97,14 @@ pub async fn run() {
         );
     });
     assert_eq!(
-        cast_wire::probe(address, false, CancellationToken::new())
-            .await
-            .unwrap(),
+        cast_wire::probe(
+            &CastTransport::default(),
+            address,
+            false,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap(),
         Some("passive-screen".into())
     );
     server.await.unwrap();

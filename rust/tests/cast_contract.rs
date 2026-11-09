@@ -1,7 +1,8 @@
 use isponsorblocktv::discovery::{
     cast::{Subnet, device_metadata, group_endpoints, polling_allowed},
     cast_wire::{
-        self, CONNECTION, CastError, CastMessage, FrameDecoder, HEARTBEAT, MAX_FRAME, MDX, RECEIVER,
+        self, CONNECTION, CastError, CastMessage, CastTransport, FrameDecoder, HEARTBEAT,
+        MAX_FRAME, MDX, RECEIVER,
     },
 };
 use serde_json::json;
@@ -78,9 +79,14 @@ async fn tls_active_launch_retry_heartbeat_and_transport_replacement() {
         .await;
     });
     assert_eq!(
-        cast_wire::probe(address, true, CancellationToken::new())
-            .await
-            .unwrap(),
+        cast_wire::probe(
+            &CastTransport::default(),
+            address,
+            true,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap(),
         Some("current-screen".into())
     );
     server.await.unwrap();
@@ -105,9 +111,14 @@ async fn tls_passive_never_launches_absent_application() {
         assert_eq!(stream.read(&mut byte).await.unwrap_or(0), 0);
     });
     assert_eq!(
-        cast_wire::probe(address, false, CancellationToken::new())
-            .await
-            .unwrap(),
+        cast_wire::probe(
+            &CastTransport::default(),
+            address,
+            false,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap(),
         None
     );
     server.await.unwrap();
@@ -268,7 +279,11 @@ async fn tls_handshake_cancellation_closes_native_socket() {
     let address = listener.local_addr().unwrap();
     let token = CancellationToken::new();
     let client_token = token.clone();
-    let worker = tokio::spawn(async move { cast_wire::probe(address, true, client_token).await });
+    let transport = CastTransport::default();
+    let worker_transport = transport.clone();
+    let worker = tokio::spawn(async move {
+        cast_wire::probe(&worker_transport, address, true, client_token).await
+    });
     let (mut server, _) = listener.accept().await.unwrap();
     token.cancel();
     assert!(matches!(worker.await.unwrap(), Err(CastError::Cancelled)));
@@ -277,6 +292,28 @@ async fn tls_handshake_cancellation_closes_native_socket() {
         .await
         .unwrap()
         .unwrap();
+    // Cancelling a socket must not poison the shared TLS policy for later probes.
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut stream = acceptor().accept(tcp).await.unwrap();
+        handshake(&mut stream).await;
+        send(
+            &mut stream,
+            "receiver-0",
+            RECEIVER,
+            json!({"type":"RECEIVER_STATUS","requestId":1,"status":{}}),
+        )
+        .await;
+        let mut byte = [0];
+        assert_eq!(stream.read(&mut byte).await.unwrap_or(0), 0);
+    });
+    assert_eq!(
+        cast_wire::probe(&transport, address, false, CancellationToken::new())
+            .await
+            .unwrap(),
+        None
+    );
+    server.await.unwrap();
 }
 
 #[tokio::test]

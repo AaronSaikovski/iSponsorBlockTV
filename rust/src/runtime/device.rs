@@ -166,11 +166,11 @@ impl DeviceActor {
             if !self.connected && !self.lifecycle_busy && Instant::now() >= self.retry_at {
                 self.start_lifecycle();
             }
-            if self.connected && !self.stream_started && self.ids().is_some() {
+            if self.connected && !self.stream_started && self.has_session_ids() {
                 self.start_stream(sender.clone());
             }
             self.dispatch_queued();
-            let skip_at = if self.connected && self.in_flight.is_none() && self.ids().is_some() {
+            let skip_at = if self.connected && self.in_flight.is_none() && self.has_session_ids() {
                 next_skip(
                     &self.snapshot,
                     &self.segments,
@@ -228,8 +228,12 @@ impl DeviceActor {
         }
     }
 
+    fn has_session_ids(&self) -> bool {
+        !self.sid.is_empty() && !self.gsession.is_empty()
+    }
+
     fn ids(&self) -> Option<SessionIds> {
-        if self.sid.is_empty() || self.gsession.is_empty() {
+        if !self.has_session_ids() {
             None
         } else {
             Some(SessionIds {
@@ -396,7 +400,7 @@ impl DeviceActor {
                         self.connected = true;
                         self.last_event = Instant::now();
                         self.batch(batch);
-                        if self.connected && self.ids().is_none() {
+                        if self.connected && !self.has_session_ids() {
                             tracing::warn!(
                                 "Lounge handshake did not provide both session identifiers"
                             );
@@ -771,7 +775,7 @@ impl DeviceActor {
     }
 
     fn dispatch_queued(&mut self) {
-        if !self.connected || self.in_flight.is_some() || self.ids().is_none() {
+        if !self.connected || self.in_flight.is_some() || !self.has_session_ids() {
             return;
         }
         while let Some(mut queued) = self.queue.pop_front() {
@@ -800,7 +804,7 @@ impl DeviceActor {
     }
 
     fn dispatch_skip(&mut self) {
-        if self.in_flight.is_some() || !self.connected || self.ids().is_none() {
+        if self.in_flight.is_some() || !self.connected || !self.has_session_ids() {
             return;
         }
         let Some((index, delay)) = next_skip(

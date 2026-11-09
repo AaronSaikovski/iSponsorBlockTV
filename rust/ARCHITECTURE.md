@@ -82,14 +82,17 @@ before calling `run_app(PreparedApp)`; reusable application code never installs
 a global subscriber. Help/version exit through Clap without loading config.
 
 `start` validates the prepared document into `RuntimeConfig`. The supervisor
-constructs transports before spawning actors, then shares immutable configuration
-and `ApiService`. Each actor alone mutates its device state; child jobs return
-results tagged with identity rather than directly changing playback. A slow
-receiver does not serialize control of other devices.
+constructs one policy-separated HTTP client bundle, shared by `ApiService` and
+all Lounge transports, before spawning actors. Configuration is immutable. Each
+actor alone mutates its device state; child jobs return results tagged with
+identity rather than directly changing playback. A slow receiver does not
+serialize control of other devices.
 
 `setup` and `setup-cli` instead edit `ConfigDocument`. The TUI uses events → pure
 reducer → effects: `state.rs` owns draft and generations, `tui.rs` owns async jobs,
-and `widgets.rs` renders state and hit targets.
+and `widgets.rs` renders state and hit targets. Rendering and focus queries share
+a borrowed row traversal; only rendering formats labels into owned strings.
+Navigation does not build a temporary list of formatted rows.
 
 ## Data and persistence
 
@@ -228,6 +231,12 @@ rate-limits failed reprobes, and continues until cancelled. Opening the TUI's
 Add device screen starts active discovery even while the TV-code tab is selected.
 Manual `setup-cli` pairing avoids that scan. Cast probes finish after MDX identity
 extraction; they are not persistent playback connections.
+
+Discovery clones share a lazily initialized Cast TLS connector and a FIFO cache
+of at most 16 metadata HTTP clients. Each client pins its connection pool to one
+full socket address, including IPv6 scope and port; the synthetic URL authority
+must never merge receiver routes. Cache locks do not cross network awaits.
+Eviction releases the cached client; later requests recreate its pinned pool.
 
 - **INV-13 — Native LAN confinement:** DIAL URLs must use the responder's literal
   IP without credentials, fragments or redirects. Cast uses admitted resolved

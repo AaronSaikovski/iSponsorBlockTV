@@ -1,0 +1,15 @@
+{
+  "devices": [],
+  "log_level": "info",
+  "skip_categories": ["sponsor"],
+  "minimum_skip_length": 1.0,
+  "skip_count_tracking": true,
+  "mute_ads": false,
+  "skip_ads": false,
+  "auto_play": true,
+  "use_proxy": false,
+  "apikey": "",
+  "channel_whitelist": [],
+  "sponsorblock_api_url": "https://sponsor.ajay.app/api/",
+  "join_name": "iSponsorBlockTV"
+}

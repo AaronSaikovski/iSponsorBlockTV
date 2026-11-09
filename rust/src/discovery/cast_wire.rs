@@ -22,7 +22,11 @@
 use bytes::{Buf, BytesMut};
 use prost::Message;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -176,28 +180,49 @@ async fn send<S: AsyncWrite + Unpin>(
         .map_err(|_| CastError::Transport)
 }
 
+/// Shared immutable TLS policy; sockets and negotiation state remain per probe.
+/// Only successful setup is retained, for the owning discovery's lifetime.
+#[derive(Clone, Default)]
+pub struct CastTransport {
+    connector: Arc<Mutex<Option<tokio_native_tls::TlsConnector>>>,
+}
+
+impl CastTransport {
+    fn connector(&self) -> Result<tokio_native_tls::TlsConnector, CastError> {
+        let mut connector = self.connector.lock().map_err(|_| CastError::Tls)?;
+        if let Some(connector) = connector.as_ref() {
+            return Ok(connector.clone());
+        }
+        let configured = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+            .build()
+            .map_err(|_| CastError::Tls)?;
+        let configured = tokio_native_tls::TlsConnector::from(configured);
+        *connector = Some(configured.clone());
+        Ok(configured)
+    }
+}
+
 /// Pin the resolved socket address; TLS is encrypted but deliberately does not
 /// authenticate receivers on the trusted LAN. Cloud certificate policy is untouched.
 pub async fn probe(
+    transport: &CastTransport,
     address: SocketAddr,
     active: bool,
     cancel: CancellationToken,
 ) -> Result<Option<String>, CastError> {
-    probe_with_permission(address, active, cancel, || true).await
+    probe_with_permission(transport, address, active, cancel, || true).await
 }
 
 pub(crate) async fn probe_with_permission<F: FnMut() -> bool>(
+    transport: &CastTransport,
     address: SocketAddr,
     active: bool,
     cancel: CancellationToken,
     permission: F,
 ) -> Result<Option<String>, CastError> {
-    let connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|_| CastError::Tls)?;
-    let connector = tokio_native_tls::TlsConnector::from(connector);
+    let connector = transport.connector()?;
     let connect = async {
         let tcp = TcpStream::connect(address)
             .await

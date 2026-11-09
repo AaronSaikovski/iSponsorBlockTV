@@ -40,7 +40,11 @@ pub async fn run(
         return Err(RuntimeError::NoDevices);
     }
     let clients = HttpClients::new(config.use_proxy, http_tracing)?;
-    let api = Arc::new(ApiService::new(&config, endpoints.clone(), http_tracing)?);
+    let api = Arc::new(ApiService::with_http(
+        &config,
+        endpoints.clone(),
+        clients.clone(),
+    )?);
     let config = Arc::new(config);
     let actors_shutdown = CancellationToken::new();
     let mut actors = JoinSet::new();

@@ -76,7 +76,7 @@ impl ApiClient {
         route: &str,
         params: &[(&str, &str)],
     ) -> Result<Vec<T>, ApiError> {
-        if self.state.options.apikey.is_empty() {
+        if self.state.apikey.is_empty() {
             return Err(ApiError::MissingApiKey);
         }
         let url = self
@@ -91,7 +91,7 @@ impl ApiClient {
             .cloud
             .request(Method::GET, url)
             .query(params)
-            .query(&[("key", self.state.options.apikey.as_str())]);
+            .query(&[("key", self.state.apikey.as_str())]);
         let response = self.state.http.cloud.execute(request).await?;
         let envelope: Envelope<T> = decode(response, "YouTube")?;
         if envelope.error.is_some() {

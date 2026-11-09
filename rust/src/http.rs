@@ -1,7 +1,9 @@
 //! Shared transport policies. Only Cast-local metadata accepts self-signed TLS;
 //! callers must additionally enforce discovery's responder/subnet admission rules.
 use std::{
+    collections::{HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -287,23 +289,69 @@ pub fn redacted_url(url: &Url) -> String {
     format!("{}://[redacted]/{route}", url.scheme())
 }
 
+// Bound retained pools independently of discovery's larger candidate budget.
+// Sixteen covers HTTP/HTTPS metadata for eight concurrent probes; every full
+// socket address owns its pool, so the synthetic authority never crosses routes.
+const MAX_METADATA_CLIENTS: usize = 16;
+
+#[derive(Default)]
+struct MetadataClients {
+    clients: HashMap<SocketAddr, HttpClient>,
+    insertion_order: VecDeque<SocketAddr>,
+}
+
 #[derive(Clone)]
 pub struct CastLocalClient {
     inner: HttpClient,
+    metadata_clients: Arc<Mutex<MetadataClients>>,
     #[cfg(test)]
-    metadata_destination: Option<SocketAddr>,
+    metadata_destinations: HashMap<SocketAddr, SocketAddr>,
 }
 
 impl CastLocalClient {
     #[cfg(test)]
-    fn with_metadata_destination(address: SocketAddr) -> Result<Self, HttpError> {
-        if !address.ip().is_loopback() {
+    fn with_metadata_destinations(
+        destinations: HashMap<SocketAddr, SocketAddr>,
+    ) -> Result<Self, HttpError> {
+        if destinations
+            .values()
+            .any(|address| !address.ip().is_loopback())
+        {
             return Err(HttpError::InvalidCastAddress);
         }
         Ok(Self {
             inner: HttpClient::build(cast_builder(), false)?,
-            metadata_destination: Some(address),
+            metadata_clients: Arc::default(),
+            metadata_destinations: destinations,
         })
+    }
+
+    fn metadata_client(
+        &self,
+        address: SocketAddr,
+        destination: SocketAddr,
+    ) -> Result<HttpClient, HttpError> {
+        let mut cache = self
+            .metadata_clients
+            .lock()
+            .map_err(|_| HttpError::Configuration)?;
+        if let Some(client) = cache.clients.get(&address) {
+            return Ok(client.clone());
+        }
+        // Build under the short synchronous lock so concurrent probes do not
+        // duplicate TLS setup. Failed construction never enters the cache.
+        let client = HttpClient::build(
+            cast_builder().resolve_to_addrs("cast-local.invalid", &[destination]),
+            self.inner.tracing,
+        )?;
+        if cache.clients.len() == MAX_METADATA_CLIENTS
+            && let Some(oldest) = cache.insertion_order.pop_front()
+        {
+            cache.clients.remove(&oldest);
+        }
+        cache.insertion_order.push_back(address);
+        cache.clients.insert(address, client.clone());
+        Ok(client)
     }
 
     /// Fetch Eureka metadata at an address already admitted against discovery's
@@ -348,7 +396,11 @@ impl CastLocalClient {
         }
         let destination = address;
         #[cfg(test)]
-        let destination = self.metadata_destination.unwrap_or(destination);
+        let destination = self
+            .metadata_destinations
+            .get(&address)
+            .copied()
+            .unwrap_or(destination);
         // A fixed synthetic authority forces reqwest through the pinned DNS
         // override rather than reparsing a scope-less IPv6 URL as an address.
         let url = Url::parse(&format!(
@@ -356,10 +408,7 @@ impl CastLocalClient {
             destination.port()
         ))
         .map_err(|_| HttpError::InvalidEndpoint)?;
-        let client = HttpClient::build(
-            cast_builder().resolve_to_addrs("cast-local.invalid", &[destination]),
-            self.inner.tracing,
-        )?;
+        let client = self.metadata_client(address, destination)?;
         let host = if empty_host {
             String::new()
         } else {
@@ -440,12 +489,17 @@ impl HttpClients {
             dial: HttpClient::build(base_builder(false), http_tracing)?,
             cast_local: CastLocalClient {
                 inner: HttpClient::build(cast_builder(), http_tracing)?,
+                metadata_clients: Arc::default(),
                 #[cfg(test)]
-                metadata_destination: None,
+                metadata_destinations: HashMap::new(),
             },
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/fixtures/cast_identity.rs"]
+mod cast_identity;
 
 #[cfg(test)]
 mod metadata_tests {
@@ -462,12 +516,21 @@ mod metadata_tests {
     #[tokio::test]
     async fn scoped_metadata_pins_transport_and_preserves_http_host_retry() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client =
-            CastLocalClient::with_metadata_destination(listener.local_addr().unwrap()).unwrap();
+        let address = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse::<Ipv6Addr>().unwrap(),
+            8008,
+            0,
+            7,
+        ));
+        let client = CastLocalClient::with_metadata_destinations(HashMap::from([(
+            address,
+            listener.local_addr().unwrap(),
+        )]))
+        .unwrap();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
+            let (mut socket, _) = listener.accept().await.unwrap();
             for status in [403, 200] {
-                let (mut socket, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
                     let mut chunk = [0; 1024];
@@ -477,18 +540,16 @@ mod metadata_tests {
                     assert!(bytes.len() < 16384);
                 }
                 requests.push(String::from_utf8(bytes).unwrap());
-                socket.write_all(format!(
-                    "HTTP/1.1 {status} Fixture\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
-                ).as_bytes()).await.unwrap();
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 {status} Fixture\r\nContent-Length: 2\r\n\r\n{{}}")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
             }
             requests
         });
-        let address = SocketAddr::V6(SocketAddrV6::new(
-            "fe80::1".parse::<Ipv6Addr>().unwrap(),
-            8008,
-            0,
-            7,
-        ));
         let path = "/setup/eureka_info?params=device_info,name";
         assert_eq!(
             client
@@ -525,11 +586,218 @@ mod metadata_tests {
         }
     }
 
+    async fn metadata_connection<S>(mut stream: S, body: String)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                request.push(byte[0]);
+                assert!(request.len() < 16384);
+            }
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    fn metadata_peer(
+        listener: TcpListener,
+        label: &'static str,
+        secure: bool,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let acceptor = secure.then(cast_identity::acceptor);
+            let mut connections = tokio::task::JoinSet::new();
+            let mut number = 0;
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                number += 1;
+                let body = format!("{label}:{number}");
+                let acceptor = acceptor.clone();
+                connections.spawn(async move {
+                    if let Some(acceptor) = acceptor {
+                        metadata_connection(acceptor.accept(socket).await.unwrap(), body).await;
+                    } else {
+                        metadata_connection(socket, body).await;
+                    }
+                });
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn metadata_reuses_connections_without_sharing_receiver_routes() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secure = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let scoped = |scope, port| {
+            SocketAddr::V6(SocketAddrV6::new(
+                "fe80::1".parse().unwrap(),
+                port,
+                0,
+                scope,
+            ))
+        };
+        let addresses = [
+            scoped(7, 8008),
+            scoped(8, 8008),
+            "192.0.2.42:8008".parse().unwrap(),
+            scoped(7, 8443),
+        ];
+        let destinations = [
+            first.local_addr().unwrap(),
+            first.local_addr().unwrap(),
+            second.local_addr().unwrap(),
+            secure.local_addr().unwrap(),
+        ];
+        let client = CastLocalClient::with_metadata_destinations(
+            addresses.into_iter().zip(destinations).collect(),
+        )
+        .unwrap();
+        let peers = [
+            metadata_peer(first, "first", false),
+            metadata_peer(second, "second", false),
+            metadata_peer(secure, "secure", true),
+        ];
+        for (address, expected) in addresses
+            .into_iter()
+            .zip(["first:1", "first:2", "second:1", "secure:1"])
+        {
+            for (path, empty_host) in [
+                ("/setup/eureka_info?params=device_info,name", false),
+                ("/setup/eureka_info?params=multizone", true),
+            ] {
+                // Clones share the bounded cache, but distinct full socket
+                // addresses cannot share the synthetic authority's pool.
+                let response = client
+                    .clone()
+                    .get_metadata(address, path, empty_host)
+                    .await
+                    .unwrap();
+                assert_eq!(response.body.as_ref(), expected.as_bytes());
+            }
+        }
+        for peer in peers {
+            peer.abort();
+            let _ = peer.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_pool_eviction_reconnects_only_the_evicted_route() {
+        use futures_util::FutureExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let addresses: Vec<_> = (1..=MAX_METADATA_CLIENTS + 1)
+            .map(|scope| {
+                SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::1".parse().unwrap(),
+                    8008,
+                    0,
+                    scope as u32,
+                ))
+            })
+            .collect();
+        let client = CastLocalClient::with_metadata_destinations(
+            addresses
+                .iter()
+                .map(|&address| (address, destination))
+                .collect(),
+        )
+        .unwrap();
+        let peer = metadata_peer(listener, "pool", false);
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let path = "/setup/eureka_info?params=multizone";
+            for (index, &address) in addresses.iter().enumerate() {
+                let response = client.get_metadata(address, path, false).await.unwrap();
+                assert_eq!(
+                    response.body.as_ref(),
+                    format!("pool:{}", index + 1).as_bytes()
+                );
+            }
+            // Overflow releases the oldest pool without discarding other routes.
+            let response = client
+                .get_metadata(addresses[0], path, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.body.as_ref(),
+                format!("pool:{}", MAX_METADATA_CLIENTS + 2).as_bytes()
+            );
+            let response = client
+                .get_metadata(*addresses.last().unwrap(), path, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.body.as_ref(),
+                format!("pool:{}", MAX_METADATA_CLIENTS + 1).as_bytes()
+            );
+        })
+        .catch_unwind()
+        .await;
+        peer.abort();
+        let _ = peer.await;
+        outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[tokio::test]
+    async fn cancelled_metadata_request_does_not_poison_cached_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = "192.0.2.42:8008".parse().unwrap();
+        let client = CastLocalClient::with_metadata_destinations(HashMap::from([(
+            address,
+            listener.local_addr().unwrap(),
+        )]))
+        .unwrap();
+        let pending_client = client.clone();
+        let pending = tokio::spawn(async move {
+            pending_client
+                .get_metadata(address, "/setup/eureka_info?params=multizone", false)
+                .await
+        });
+        let (mut stalled, _) = listener.accept().await.unwrap();
+        let mut byte = [0];
+        assert_eq!(stalled.read(&mut byte).await.unwrap(), 1);
+        pending.abort();
+        assert!(matches!(pending.await, Err(error) if error.is_cancelled()));
+        let mut remaining = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stalled.read_to_end(&mut remaining))
+            .await
+            .unwrap()
+            .unwrap();
+        let peer = metadata_peer(listener, "recovered", false);
+        let response = client
+            .get_metadata(address, "/setup/eureka_info?params=multizone", false)
+            .await
+            .unwrap();
+        assert_eq!(response.body.as_ref(), b"recovered:1");
+        peer.abort();
+        let _ = peer.await;
+    }
+
     #[tokio::test]
     async fn metadata_keeps_response_cap_and_does_not_follow_redirects() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client =
-            CastLocalClient::with_metadata_destination(listener.local_addr().unwrap()).unwrap();
+        let address = "192.0.2.42:8008".parse().unwrap();
+        let client = CastLocalClient::with_metadata_destinations(HashMap::from([(
+            address,
+            listener.local_addr().unwrap(),
+        )]))
+        .unwrap();
         let server = tokio::spawn(async move {
             for response in [
                 "HTTP/1.1 302 Fixture\r\nContent-Length: 0\r\nLocation: http://127.0.0.1:1/\r\nConnection: close\r\n\r\n".to_owned(),
@@ -543,7 +811,6 @@ mod metadata_tests {
         });
         // A globally numbered on-link receiver is valid; test-only constructor
         // injection pins its transport to this loopback fixture.
-        let address = "192.0.2.42:8008".parse().unwrap();
         let path = "/setup/eureka_info?params=multizone";
         assert_eq!(
             client

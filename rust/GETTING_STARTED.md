@@ -18,6 +18,13 @@ Before deployment, read the [dependency security warning](README.md#dependency-s
 It records an unresolved vendored OpenSSL advisory affecting Linux builds,
 including Docker. Passing tests or rebuilding the same lockfile does not resolve it.
 
+The latest HTTP/Cast client-reuse and setup-allocation improvements are automatic.
+There are no new tuning flags, configuration migrations, or re-pairing steps.
+Keep your existing data directory: rebuild and restart a local installation, or
+follow [Update the container](#update-the-container) for Docker. See
+[runtime efficiency](README.md#runtime-efficiency) for the measured change;
+it is not a physical-device or Raspberry Pi performance guarantee.
+
 ## Option A: Run locally
 
 ### Prerequisites
@@ -33,6 +40,35 @@ including Docker. Passing tests or rebuilding the same lockfile does not resolve
 
 Commands below assume your terminal is in the checkout's **`rust/` directory**.
 Use a separate data directory or backup when trying existing Python configuration.
+
+### Optional: start from the sample configuration
+
+[config.json.example](config.json.example) lists common settings using the
+application's current runtime defaults. Setup also works without copying it.
+For a new local installation, from `rust/` in a POSIX shell:
+
+```sh
+mkdir -p ./data
+cp -n config.json.example ./data/config.json
+```
+
+`cp -n` does not overwrite an existing configuration. On Windows, copy the file
+to your data directory as `config.json` only if that file does not already exist.
+For Docker or Raspberry Pi, copy it into your chosen host
+`ISPBTV_RUST_DATA_DIR` instead, before running the pairing container.
+
+The sample skips sponsor segments longer than one second, uses `info` logging,
+enables autoplay and viewed-segment reporting, and leaves ad muting/skipping
+disabled. Enable `mute_ads` and/or `skip_ads` if wanted; set
+`skip_count_tracking` to `false` to disable UUID reporting. Proxy use and channel
+whitelisting are off, so no API key is required.
+`use_proxy: true` opts cloud traffic into proxy environment variables; it does not
+create a proxy or route LAN discovery through one. See
+[proxy settings](README.md#proxy-settings), including Docker environment handling.
+
+The empty `devices` array is intentional: there are no invented credentials.
+Continue with setup, pair your TV, and explicitly save before starting the service.
+Do not replace an existing paired config with this sample.
 
 ### Build and pair
 
@@ -120,6 +156,29 @@ For a local service, press Ctrl-C and wait for it to stop, back up and edit
 `config.json` inside your `--data` directory, then rerun the same start command.
 Changes take effect on restart, not while the service is running. For Docker,
 follow the stop/edit/restart procedure below.
+
+### Recover from a mixed Rust toolchain
+
+If Cargo or Clippy reports `E0514` / “compiled by an incompatible version of
+rustc”, check for a mixture of Homebrew and rustup executables or old build
+artifacts. Even matching version numbers can represent incompatible distributions.
+From `rust/`, use one rustup toolchain for Cargo, rustc, Clippy and rustdoc:
+
+```sh
+export PATH="$(dirname "$(rustup which rustc)"):$PATH"
+export RUSTC="$(rustup which rustc)"
+export RUSTDOC="$(rustup which rustdoc)"
+export CARGO_TARGET_DIR="$PWD/target/rustup-native"
+cargo build --locked --release
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+The separate target directory leaves existing artifacts intact. In that shell,
+Cargo commands use it automatically; direct executable commands must instead use
+`./target/rustup-native/release/isponsorblocktvrust`. These environment exports
+apply to the current shell; preserve them for subsequent builds or choose one
+toolchain consistently in your shell configuration.
 
 ### Use a release binary instead
 
@@ -432,7 +491,7 @@ it contains device identifiers and may contain API keys. Do not commit it.
 | Sponsor segments not skipped | Check categories, segment availability, minimum length, whitelist, and that the service is running |
 | TUI refuses to start | Use an interactive terminal or switch to `setup-cli` |
 | Discovery finds nothing | Pair manually; discovery needs LAN access and multicast support |
-| E0514 compiler mismatch | Put rustup first on `PATH`; set `CARGO_TARGET_DIR=target/rustup-native` and rebuild; direct executables then live under that directory |
+| E0514 compiler mismatch | Follow [Recover from a mixed Rust toolchain](#recover-from-a-mixed-rust-toolchain); select one toolchain and a separate target directory |
 | Existing config fails validation | Back it up and correct it through setup; saved drafts can still be incomplete for startup |
 | Malformed JSON cannot open in setup | Restore a valid backup; setup deliberately refuses to overwrite malformed configuration |
 | Preferences change after rerunning prompt setup | Explicitly answer fixed-default prompts before saving; Enter does not always retain saved values |

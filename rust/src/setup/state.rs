@@ -172,6 +172,58 @@ pub struct SetupState {
     channel_name: TextInput,
 }
 
+// The layout borrows category names and formatting arguments. Only rendering
+// owns labels; focus and navigation consume the same ordering without them.
+enum RowAction<'a> {
+    Button(Action),
+    Category(&'a str),
+}
+
+impl RowAction<'_> {
+    fn into_action(self) -> Action {
+        match self {
+            Self::Button(action) => action,
+            Self::Category(category) => Action::Category(category.to_owned()),
+        }
+    }
+}
+
+struct RowSpec<'a> {
+    label: std::fmt::Arguments<'a>,
+    action: RowAction<'a>,
+    field: Option<Field>,
+    masked: bool,
+}
+
+impl<'a> RowSpec<'a> {
+    fn button(label: std::fmt::Arguments<'a>, action: Action) -> Self {
+        Self {
+            label,
+            action: RowAction::Button(action),
+            field: None,
+            masked: false,
+        }
+    }
+
+    fn input(label: std::fmt::Arguments<'a>, field: Field, masked: bool) -> Self {
+        Self {
+            label,
+            action: RowAction::Button(Action::Input(field)),
+            field: Some(field),
+            masked,
+        }
+    }
+
+    fn category(label: std::fmt::Arguments<'a>, category: &'a str) -> Self {
+        Self {
+            label,
+            action: RowAction::Category(category),
+            field: None,
+            masked: false,
+        }
+    }
+}
+
 impl SetupState {
     pub fn new(document: ConfigDocument) -> Self {
         let text = |key: &str, fallback: &str| {
@@ -272,13 +324,26 @@ impl SetupState {
         }
     }
     pub fn focused_action(&self) -> Option<Action> {
-        self.rows().get(self.focus).map(|row| row.action.clone())
+        let mut index = 0;
+        let mut action = None;
+        self.visit_rows(|row| {
+            if index == self.focus {
+                action = Some(row.action.into_action());
+            }
+            index += 1;
+        });
+        action
     }
     pub fn focused_field(&self) -> Option<Field> {
-        match self.focused_action() {
-            Some(Action::Input(field)) => Some(field),
-            _ => None,
-        }
+        let mut index = 0;
+        let mut field = None;
+        self.visit_rows(|row| {
+            if index == self.focus {
+                field = row.field;
+            }
+            index += 1;
+        });
+        field
     }
     pub fn values(&self, key: &str) -> &[Value] {
         self.draft
@@ -329,124 +394,189 @@ impl SetupState {
     }
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        let button = |label: &str, action| Row::button(label, action);
+        self.visit_rows(|row| {
+            rows.push(Row {
+                label: row.label.to_string(),
+                action: row.action.into_action(),
+                field: row.field,
+                masked: row.masked,
+            });
+        });
+        rows
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        let mut count = 0;
+        self.visit_rows(|_| count += 1);
+        count
+    }
+
+    fn visit_rows(&self, mut visit: impl FnMut(RowSpec<'_>)) {
         match self.screen {
             Screen::Main => {
-                rows.push(button("Add device", Action::AddDevice));
+                visit(RowSpec::button(
+                    format_args!("Add device"),
+                    Action::AddDevice,
+                ));
                 for (i, device) in self.values("devices").iter().enumerate() {
                     let name = device
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("Unnamed device");
-                    rows.push(Row::button(
-                        format!("Edit device: {name}"),
+                    visit(RowSpec::button(
+                        format_args!("Edit device: {name}"),
                         Action::EditDevice(i),
                     ));
-                    rows.push(Row::button(
-                        format!("Remove device: {name}"),
+                    visit(RowSpec::button(
+                        format_args!("Remove device: {name}"),
                         Action::RemoveDevice(i),
                     ));
                 }
-                let selected = self.categories();
-                let mut categories: Vec<String> = CATEGORIES.iter().map(|s| (*s).into()).collect();
-                for category in &selected {
-                    if !categories.contains(category) {
-                        categories.push(category.clone());
+                let selected = self
+                    .draft
+                    .0
+                    .get("skip_categories")
+                    .and_then(Value::as_array);
+                let mut category_row = |category: &str| {
+                    let checked = selected.map_or(category == "sponsor", |values| {
+                        values.iter().any(|value| value.as_str() == Some(category))
+                    });
+                    visit(RowSpec::category(
+                        format_args!("[{}] Skip {category}", if checked { "x" } else { " " }),
+                        category,
+                    ));
+                };
+                for category in CATEGORIES {
+                    category_row(category);
+                }
+                if let Some(selected) = selected {
+                    for (index, value) in selected.iter().enumerate() {
+                        if let Some(category) = value.as_str()
+                            && !CATEGORIES.contains(&category)
+                            && !selected[..index]
+                                .iter()
+                                .any(|value| value.as_str() == Some(category))
+                        {
+                            category_row(category);
+                        }
                     }
                 }
-                for category in categories {
-                    rows.push(Row::button(
-                        format!(
-                            "[{}] Skip {category}",
-                            if selected.contains(&category) {
-                                "x"
-                            } else {
-                                " "
-                            }
-                        ),
-                        Action::Category(category),
-                    ));
-                }
-                rows.push(Row::input("Minimum skip seconds", Field::Minimum, false));
+                visit(RowSpec::input(
+                    format_args!("Minimum skip seconds"),
+                    Field::Minimum,
+                    false,
+                ));
                 for (key, label) in [
                     ("skip_count_tracking", "Report skipped segments"),
                     ("mute_ads", "Mute YouTube ads"),
                     ("skip_ads", "Skip YouTube ads"),
                 ] {
-                    rows.push(Row::button(
-                        format!("[{}] {label}", if self.boolean(key) { "x" } else { " " }),
+                    visit(RowSpec::button(
+                        format_args!("[{}] {label}", if self.boolean(key) { "x" } else { " " }),
                         Action::Toggle(key),
                     ));
                 }
-                rows.push(button("Add whitelist channel", Action::AddChannel));
+                visit(RowSpec::button(
+                    format_args!("Add whitelist channel"),
+                    Action::AddChannel,
+                ));
                 for (i, channel) in self.values("channel_whitelist").iter().enumerate() {
                     let name = channel
                         .get("name")
                         .and_then(Value::as_str)
                         .or_else(|| channel.get("id").and_then(Value::as_str))
                         .unwrap_or("Unnamed channel");
-                    rows.push(Row::button(
-                        format!("Remove channel: {name}"),
+                    visit(RowSpec::button(
+                        format_args!("Remove channel: {name}"),
                         Action::RemoveChannel(i),
                     ));
                 }
-                rows.push(Row::input("YouTube API key", Field::ApiKey, !self.show_key));
-                rows.push(button(
-                    if self.show_key {
-                        "Hide API key"
-                    } else {
-                        "Show API key"
-                    },
+                visit(RowSpec::input(
+                    format_args!("YouTube API key"),
+                    Field::ApiKey,
+                    !self.show_key,
+                ));
+                visit(RowSpec::button(
+                    format_args!(
+                        "{}",
+                        if self.show_key {
+                            "Hide API key"
+                        } else {
+                            "Show API key"
+                        }
+                    ),
                     Action::ShowKey,
                 ));
-                rows.push(button(
-                    "Get YouTube API credentials (browser)",
+                visit(RowSpec::button(
+                    format_args!("Get YouTube API credentials (browser)"),
                     Action::Credentials,
                 ));
                 for (key, label) in [("auto_play", "Autoplay"), ("use_proxy", "Use system proxy")] {
-                    rows.push(Row::button(
-                        format!("[{}] {label}", if self.boolean(key) { "x" } else { " " }),
+                    visit(RowSpec::button(
+                        format_args!("[{}] {label}", if self.boolean(key) { "x" } else { " " }),
                         Action::Toggle(key),
                     ));
                 }
-                rows.push(Row::input("SponsorBlock API URL", Field::BaseUrl, false));
-                rows.push(button("Save configuration", Action::Save));
-                rows.push(button("Exit", Action::Exit));
+                visit(RowSpec::input(
+                    format_args!("SponsorBlock API URL"),
+                    Field::BaseUrl,
+                    false,
+                ));
+                visit(RowSpec::button(
+                    format_args!("Save configuration"),
+                    Action::Save,
+                ));
+                visit(RowSpec::button(format_args!("Exit"), Action::Exit));
             }
             Screen::Migration => {
-                rows.push(button("Remove atvs and save", Action::Migrate));
-                rows.push(button("Keep atvs", Action::Keep));
+                visit(RowSpec::button(
+                    format_args!("Remove atvs and save"),
+                    Action::Migrate,
+                ));
+                visit(RowSpec::button(format_args!("Keep atvs"), Action::Keep));
             }
             Screen::ConfirmExit => {
-                rows.push(button("Save and exit", Action::SaveExit));
-                rows.push(button("Discard and exit", Action::Discard));
-                rows.push(button("Cancel", Action::Cancel));
+                visit(RowSpec::button(
+                    format_args!("Save and exit"),
+                    Action::SaveExit,
+                ));
+                visit(RowSpec::button(
+                    format_args!("Discard and exit"),
+                    Action::Discard,
+                ));
+                visit(RowSpec::button(format_args!("Cancel"), Action::Cancel));
             }
             Screen::AddDevice => {
-                rows.push(button(
-                    if self.lan_tab {
-                        "Pairing code tab"
-                    } else {
-                        "[Pairing code tab]"
-                    },
+                visit(RowSpec::button(
+                    format_args!(
+                        "{}",
+                        if self.lan_tab {
+                            "Pairing code tab"
+                        } else {
+                            "[Pairing code tab]"
+                        }
+                    ),
                     Action::DeviceTab(false),
                 ));
-                rows.push(button(
-                    if self.lan_tab {
-                        "[LAN discovery tab]"
-                    } else {
-                        "LAN discovery tab"
-                    },
+                visit(RowSpec::button(
+                    format_args!(
+                        "{}",
+                        if self.lan_tab {
+                            "[LAN discovery tab]"
+                        } else {
+                            "LAN discovery tab"
+                        }
+                    ),
                     Action::DeviceTab(true),
                 ));
                 if self.lan_tab {
-                    rows.push(Row::button(
-                        format!("Start search / retry — {}", self.discovery_status),
+                    visit(RowSpec::button(
+                        format_args!("Start search / retry — {}", self.discovery_status),
                         Action::Discover,
                     ));
                     for (i, device) in self.discovered.iter().enumerate() {
-                        rows.push(Row::button(
-                            format!(
+                        visit(RowSpec::button(
+                            format_args!(
                                 "[{}] {}",
                                 if device.selected { "x" } else { " " },
                                 device.name
@@ -454,73 +584,126 @@ impl SetupState {
                             Action::SelectDevice(i),
                         ));
                     }
-                    rows.push(button("Add selected devices", Action::AddDiscovered));
+                    visit(RowSpec::button(
+                        format_args!("Add selected devices"),
+                        Action::AddDiscovered,
+                    ));
                 } else {
-                    rows.push(Row::input("Twelve-digit TV code", Field::Code, false));
-                    rows.push(Row::input("Name (optional)", Field::DeviceName, false));
-                    rows.push(Row::button(
-                        format!("Validate / retry — {}", self.pairing_status),
+                    visit(RowSpec::input(
+                        format_args!("Twelve-digit TV code"),
+                        Field::Code,
+                        false,
+                    ));
+                    visit(RowSpec::input(
+                        format_args!("Name (optional)"),
+                        Field::DeviceName,
+                        false,
+                    ));
+                    visit(RowSpec::button(
+                        format_args!("Validate / retry — {}", self.pairing_status),
                         Action::ValidateCode,
                     ));
-                    rows.push(button(
-                        if self.paired.is_some() {
-                            "Add paired device"
-                        } else {
-                            "Add (validate code first)"
-                        },
+                    visit(RowSpec::button(
+                        format_args!(
+                            "{}",
+                            if self.paired.is_some() {
+                                "Add paired device"
+                            } else {
+                                "Add (validate code first)"
+                            }
+                        ),
                         Action::AddPaired,
                     ));
                 }
-                rows.push(button("Cancel", Action::Cancel));
+                visit(RowSpec::button(format_args!("Cancel"), Action::Cancel));
             }
             Screen::EditDevice => {
-                rows.push(Row::input("Name", Field::DeviceName, false));
-                rows.push(Row::input("Screen ID", Field::ScreenId, !self.show_id));
-                rows.push(button(
-                    if self.show_id {
-                        "Hide screen ID"
-                    } else {
-                        "Show screen ID"
-                    },
+                visit(RowSpec::input(
+                    format_args!("Name"),
+                    Field::DeviceName,
+                    false,
+                ));
+                visit(RowSpec::input(
+                    format_args!("Screen ID"),
+                    Field::ScreenId,
+                    !self.show_id,
+                ));
+                visit(RowSpec::button(
+                    format_args!(
+                        "{}",
+                        if self.show_id {
+                            "Hide screen ID"
+                        } else {
+                            "Show screen ID"
+                        }
+                    ),
                     Action::ShowId,
                 ));
-                rows.push(Row::input("Offset milliseconds", Field::Offset, false));
-                rows.push(Row::button(
-                    format!("Offset slider [0..2000] {} ms (←/→ 100)", self.offset.text),
+                visit(RowSpec::input(
+                    format_args!("Offset milliseconds"),
+                    Field::Offset,
+                    false,
+                ));
+                visit(RowSpec::button(
+                    format_args!("Offset slider [0..2000] {} ms (←/→ 100)", self.offset.text),
                     Action::Slider,
                 ));
-                rows.push(button("Apply and close", Action::CommitDevice));
+                visit(RowSpec::button(
+                    format_args!("Apply and close"),
+                    Action::CommitDevice,
+                ));
             }
             Screen::AddChannel => {
-                rows.push(button(
-                    if self.manual_tab {
-                        "Search tab"
-                    } else {
-                        "[Search tab]"
-                    },
+                visit(RowSpec::button(
+                    format_args!(
+                        "{}",
+                        if self.manual_tab {
+                            "Search tab"
+                        } else {
+                            "[Search tab]"
+                        }
+                    ),
                     Action::ChannelTab(false),
                 ));
-                rows.push(button(
-                    if self.manual_tab {
-                        "[Manual ID tab]"
-                    } else {
-                        "Manual ID tab"
-                    },
+                visit(RowSpec::button(
+                    format_args!(
+                        "{}",
+                        if self.manual_tab {
+                            "[Manual ID tab]"
+                        } else {
+                            "Manual ID tab"
+                        }
+                    ),
                     Action::ChannelTab(true),
                 ));
                 if self.manual_tab {
-                    rows.push(Row::input("Channel ID", Field::ChannelId, false));
-                    rows.push(Row::input("Name (optional)", Field::ChannelName, false));
-                    rows.push(button("Add channel", Action::AddManual));
+                    visit(RowSpec::input(
+                        format_args!("Channel ID"),
+                        Field::ChannelId,
+                        false,
+                    ));
+                    visit(RowSpec::input(
+                        format_args!("Name (optional)"),
+                        Field::ChannelName,
+                        false,
+                    ));
+                    visit(RowSpec::button(
+                        format_args!("Add channel"),
+                        Action::AddManual,
+                    ));
                 } else {
-                    rows.push(Row::input("Channel name query", Field::Query, false));
-                    rows.push(Row::button(
-                        format!("Search / retry — {}", self.search_status),
+                    visit(RowSpec::input(
+                        format_args!("Channel name query"),
+                        Field::Query,
+                        false,
+                    ));
+                    visit(RowSpec::button(
+                        format_args!("Search / retry — {}", self.search_status),
                         Action::Search,
                     ));
                     for (i, channel) in self.channels.iter().enumerate() {
-                        rows.push(Row::button(
-                            format!(
+                        visit(RowSpec::button(
+                            format_args!(
                                 "({}) {} — Subs: {}",
                                 if self.selected_channel == Some(i) {
                                     "x"
@@ -533,12 +716,14 @@ impl SetupState {
                             Action::SelectChannel(i),
                         ));
                     }
-                    rows.push(button("Add selected channel", Action::AddFound));
+                    visit(RowSpec::button(
+                        format_args!("Add selected channel"),
+                        Action::AddFound,
+                    ));
                 }
-                rows.push(button("Cancel", Action::Cancel));
+                visit(RowSpec::button(format_args!("Cancel"), Action::Cancel));
             }
         }
-        rows
     }
     fn stamp(&self, request: Request) -> Stamp {
         Stamp {
@@ -694,14 +879,14 @@ fn commit_device(state: &mut SetupState) -> bool {
 pub fn reduce(state: &mut SetupState, event: SetupEvent) -> Vec<SetupEffect> {
     match event {
         SetupEvent::Focus(index) => {
-            state.focus = index.min(state.rows().len().saturating_sub(1));
+            state.focus = index.min(state.row_count().saturating_sub(1));
         }
         SetupEvent::Click(index, action) => {
-            state.focus = index.min(state.rows().len().saturating_sub(1));
+            state.focus = index.min(state.row_count().saturating_sub(1));
             return activate(state, action);
         }
         SetupEvent::Move(delta) => {
-            let count = state.rows().len();
+            let count = state.row_count();
             if count > 0 {
                 state.focus = (state.focus as isize + delta).rem_euclid(count as isize) as usize;
             }
