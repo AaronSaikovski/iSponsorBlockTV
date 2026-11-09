@@ -26,8 +26,9 @@ pub struct Request {
     pub query: BTreeMap<String, String>,
     pub form: BTreeMap<String, String>,
     pub device: String,
-    /// Deferred seek and segment responses let tests order observations before HTTP.
+    /// Deferred responses let tests order observations before HTTP completion.
     pub reply: Option<oneshot::Sender<u16>>,
+    closed: Option<oneshot::Receiver<()>>,
 }
 impl Request {
     pub fn command(&self) -> Option<&str> {
@@ -37,6 +38,17 @@ impl Request {
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(status);
         }
+    }
+
+    pub async fn cancelled(mut self) {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.closed.take().expect("observable deferred termination"),
+        )
+        .await
+        .expect("client must release the termination socket")
+        .expect("server must observe client cancellation, not drop its socket");
+        assert!(self.reply.as_ref().unwrap().is_closed());
     }
 }
 
@@ -56,14 +68,22 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn start(defer_seeks: bool) -> Self {
-        Self::start_with_options(defer_seeks, false).await
+        Self::start_with_options(defer_seeks, false, false).await
     }
 
     pub async fn start_with_deferred_segments() -> Self {
-        Self::start_with_options(true, true).await
+        Self::start_with_options(true, true, false).await
     }
 
-    async fn start_with_options(defer_seeks: bool, defer_segments: bool) -> Self {
+    pub async fn start_with_deferred_terminations() -> Self {
+        Self::start_with_options(false, false, true).await
+    }
+
+    async fn start_with_options(
+        defer_seeks: bool,
+        defer_segments: bool,
+        defer_terminations: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let endpoints = Endpoints {
@@ -84,7 +104,9 @@ impl Fixture {
                     accepted = listener.accept() => {
                         let (socket, _) = accepted.unwrap();
                         let sender = sender.clone(); let streams = shared.clone();
-                        jobs.spawn(async move { serve(socket, sender, streams, defer_seeks, defer_segments).await; });
+                        jobs.spawn(async move {
+                            serve(socket, sender, streams, defer_seeks, defer_segments, defer_terminations).await;
+                        });
                     },
                     result = jobs.join_next(), if !jobs.is_empty() => { if let Some(result) = result { result.unwrap(); } },
                 }
@@ -205,6 +227,20 @@ impl Fixture {
         }
     }
 
+    pub async fn no_requests(&mut self) {
+        match tokio::time::timeout(Duration::from_millis(100), self.requests.recv()).await {
+            Err(_) => {}
+            Ok(Some(request)) => panic!(
+                "unexpected {} {} from {}: {:?}",
+                request.method,
+                request.path,
+                request.device,
+                request.command()
+            ),
+            Ok(None) => panic!("fixture stopped before quiet period"),
+        }
+    }
+
     pub async fn stop(mut self) {
         self.cancel.cancel();
         self.server.take().unwrap().await.unwrap();
@@ -274,6 +310,7 @@ async fn read_request(socket: &mut TcpStream) -> Request {
         form,
         device,
         reply: None,
+        closed: None,
     }
 }
 
@@ -292,6 +329,7 @@ async fn serve(
     streams: Streams,
     defer_seeks: bool,
     defer_segments: bool,
+    defer_terminations: bool,
 ) {
     let mut request = read_request(&mut socket).await;
     let path = request.path.clone();
@@ -371,8 +409,30 @@ async fn serve(
         };
         reply(&mut socket, status, "{}").await;
     } else if request.form.get("TYPE").is_some_and(|v| v == "terminate") {
-        sender.send(request).await.unwrap();
-        reply(&mut socket, 200, "{}").await;
+        if defer_terminations {
+            let (response, receive) = oneshot::channel();
+            let (closed, observe_closed) = oneshot::channel();
+            request.reply = Some(response);
+            request.closed = Some(observe_closed);
+            sender.send(request).await.unwrap();
+            let mut byte = [0u8; 1];
+            tokio::select! {
+                status = receive => {
+                    reply(&mut socket, status.unwrap_or(500), "{}").await;
+                }
+                result = socket.read(&mut byte) => {
+                    assert!(
+                        matches!(result, Ok(0))
+                            || matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+                        "termination socket must close without a response: {result:?}"
+                    );
+                    let _ = closed.send(());
+                }
+            }
+        } else {
+            sender.send(request).await.unwrap();
+            reply(&mut socket, 200, "{}").await;
+        }
     } else if path.ends_with("bind") {
         sender.send(request).await.unwrap();
         // Separate c and S frames ensure the actor waits for both identifiers.

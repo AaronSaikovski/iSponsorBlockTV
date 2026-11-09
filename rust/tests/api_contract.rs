@@ -443,6 +443,63 @@ async fn declared_and_chunked_bodies_enforce_the_same_limit() {
 }
 
 #[tokio::test]
+async fn gzip_body_limit_applies_to_decoded_bytes_and_accepts_exact_boundary() {
+    // Fixed gzip fixtures generated from b"x" * 1_048_576 and b"x" * 1_048_577
+    // with Python gzip.compress(..., mtime=0). Both are only 1,051 wire bytes.
+    // The common DEFLATE stream contains a long zero run; only its tail differs.
+    for (tail, oversized) in [
+        (b"\x3e\x03\x32\x9c\x3b\x15\x00\x00\x10\x00", false),
+        (b"\x4e\x03\x9f\x7c\x1e\x44\x01\x00\x10\x00", true),
+    ] {
+        let mut compressed =
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\xed\xc1\x31\x01\x00\x00\x00\xc2\xa0\xda\x8b\x6f\x08\x5f\xa0"
+                .to_vec();
+        compressed.resize(compressed.len() + 1016, 0);
+        compressed.extend_from_slice(tail);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0, "request ended before headers");
+                request.extend_from_slice(&chunk[..count]);
+                assert!(request.len() < 16384);
+            }
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        compressed.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(&compressed).await.unwrap();
+        };
+        let clients = HttpClients::new(false, false).unwrap();
+        let request = clients.cloud.request(Method::GET, url);
+        // No detached server: a timeout drops both futures and their sockets.
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            let ((), response) = tokio::join!(server, clients.cloud.execute(request));
+            response
+        })
+        .await
+        .expect("compressed response fixture timed out");
+        if oversized {
+            assert!(matches!(response, Err(HttpError::BodyTooLarge)));
+        } else {
+            let response = response.unwrap();
+            assert_eq!(response.body.len(), MAX_BODY_BYTES);
+            assert!(response.body.iter().all(|&byte| byte == b'x'));
+        }
+    }
+}
+
+#[tokio::test]
 async fn redirects_are_not_followed_and_mutating_errors_are_not_retried() {
     let mut redirect = json(302, "not JSON");
     redirect

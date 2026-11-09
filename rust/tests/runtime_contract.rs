@@ -1,12 +1,13 @@
 #[path = "fixtures/runtime_scenario.rs"]
 mod fixture;
 use fixture::{Fixture, now_playing, state};
+use futures_util::FutureExt;
 use isponsorblocktv::{
     config::RuntimeConfig,
     runtime::{self, RuntimeError},
 };
 use serde_json::json;
-use std::time::Duration;
+use std::{collections::BTreeSet, panic::AssertUnwindSafe, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +36,27 @@ async fn finish(
         .unwrap()
         .unwrap();
     fixture.stop().await;
+}
+
+async fn connected_pair(fixture: &mut Fixture) {
+    let mut connected = BTreeSet::new();
+    while connected.len() != 2 {
+        let request = fixture.next().await;
+        assert!(["screen-a", "screen-b"].contains(&request.device.as_str()));
+        assert!(request.command().is_none());
+        assert!(request.reply.is_none());
+        if request.method == "GET" && request.path.ends_with("/bind") {
+            assert!(connected.insert(request.device));
+        } else {
+            assert!(
+                request.path.ends_with("/get_lounge_token_batch")
+                    || request.path.ends_with("/get_screen_availability")
+                    || (request.method == "POST" && request.path.ends_with("/bind")),
+                "unexpected connection request: {}",
+                request.path
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -94,6 +116,134 @@ async fn segment_lookup_survives_observations_and_schedules_from_latest_position
     seek.respond(200);
     assert!(fixture.next().await.path.contains("viewedVideoSponsorTime"));
     finish(fixture, shutdown, service).await;
+}
+
+#[tokio::test]
+async fn shared_segment_lookup_survives_one_actor_changing_video() {
+    let mut fixture = Fixture::start_with_deferred_segments().await;
+    let (shutdown, mut service) = launch(&fixture, fixture.config(&["screen-a", "screen-b"]));
+    let outcome = AssertUnwindSafe(async {
+        connected_pair(&mut fixture).await;
+        fixture
+            .events(
+                "screen-a",
+                vec![
+                    now_playing("video-a", 1.0, 1),
+                    json!(["onPlaybackSpeedChanged", {"playbackSpeed":"0.01"}]),
+                ],
+            )
+            .await;
+        let mut original = None;
+        let mut observed_a = false;
+        while original.is_none() || !observed_a {
+            let request = fixture.next().await;
+            if request.path.contains("skipSegments/") {
+                assert!(original.is_none(), "duplicate original segment lookup");
+                assert!(request.reply.is_some());
+                original = Some(request);
+            } else {
+                assert_eq!(request.command(), Some("getNowPlaying"));
+                assert_eq!(request.device, "screen-a");
+                assert!(!observed_a, "duplicate observation barrier");
+                observed_a = true;
+            }
+        }
+        let original = original.unwrap();
+        let original_path = original.path.clone();
+
+        fixture
+            .events(
+                "screen-b",
+                vec![
+                    now_playing("video-a", 1.0, 1),
+                    json!(["onPlaybackSpeedChanged", {"playbackSpeed":"0.01"}]),
+                ],
+            )
+            .await;
+        // Each device's command proves its preceding observations were reduced.
+        // Do not search/filter: a second lookup must fail this assertion.
+        let barrier = fixture.next().await;
+        assert_eq!(barrier.command(), Some("getNowPlaying"));
+        assert_eq!(barrier.device, "screen-b");
+        fixture.no_requests().await;
+
+        fixture
+            .events(
+                "screen-a",
+                vec![
+                    now_playing("video-next", 1.0, 1),
+                    json!(["onPlaybackSpeedChanged", {"playbackSpeed":"0.01"}]),
+                ],
+            )
+            .await;
+        let mut replacement = None;
+        let mut switched = false;
+        while replacement.is_none() || !switched {
+            let request = fixture.next().await;
+            if request.path.contains("skipSegments/") {
+                assert_ne!(request.path, original_path, "original lookup was restarted");
+                assert!(replacement.is_none(), "duplicate replacement lookup");
+                assert!(request.reply.is_some());
+                replacement = Some(request);
+            } else {
+                assert_eq!(request.command(), Some("getNowPlaying"));
+                assert_eq!(request.device, "screen-a");
+                assert!(!switched, "duplicate switch barrier");
+                switched = true;
+            }
+        }
+
+        // The first consumer is gone, but the shared HTTP response must still
+        // reach the second actor, with no old-video mutation from screen-a.
+        original.respond(200);
+        let seek = fixture.next().await;
+        assert_eq!(seek.command(), Some("seekTo"));
+        assert_eq!(seek.device, "screen-b");
+        assert_eq!(seek.form["req0_newTime"], "5");
+        seek.respond(200);
+        let report = fixture.next().await;
+        assert!(report.path.contains("viewedVideoSponsorTime"));
+        assert_eq!(report.query["UUID"], "uuid-video-a");
+
+        fixture
+            .events(
+                "screen-a",
+                vec![
+                    state(1.0, 1),
+                    json!(["onPlaybackSpeedChanged", {"playbackSpeed":"0.01"}]),
+                ],
+            )
+            .await;
+        let barrier = fixture.next().await;
+        assert_eq!(barrier.command(), Some("getNowPlaying"));
+        assert_eq!(barrier.device, "screen-a");
+        fixture.no_requests().await;
+
+        // Also prove the switched actor remains live and reports only its new
+        // video's UUID once that distinct lookup is allowed to complete.
+        replacement.unwrap().respond(200);
+        let seek = fixture.next().await;
+        assert_eq!(seek.command(), Some("seekTo"));
+        assert_eq!(seek.device, "screen-a");
+        assert_eq!(seek.form["req0_newTime"], "5");
+        seek.respond(200);
+        let report = fixture.next().await;
+        assert!(report.path.contains("viewedVideoSponsorTime"));
+        assert_eq!(report.query["UUID"], "uuid-video-next");
+        fixture.no_requests().await;
+    })
+    .catch_unwind()
+    .await;
+
+    shutdown.cancel();
+    let stopped = tokio::time::timeout(Duration::from_secs(4), &mut service).await;
+    if stopped.is_err() {
+        service.abort();
+        let _ = service.await;
+    }
+    fixture.stop().await;
+    outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    stopped.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -350,4 +500,71 @@ async fn shutdown_cancels_pending_http_and_terminates_connected_devices() {
     }
     drop(pending);
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn shutdown_shares_one_deadline_and_releases_both_blocked_terminations() {
+    let mut fixture = Fixture::start_with_deferred_terminations().await;
+    let (shutdown, mut service) = launch(&fixture, fixture.config(&["screen-a", "screen-b"]));
+    let mut joined = false;
+    let outcome = AssertUnwindSafe(async {
+        connected_pair(&mut fixture).await;
+        shutdown.cancel();
+        let mut devices = BTreeSet::new();
+        let mut pending = Vec::new();
+        while pending.len() != 2 {
+            let request = fixture.next().await;
+            assert_eq!(
+                request.form.get("TYPE").map(String::as_str),
+                Some("terminate")
+            );
+            assert_eq!(
+                request.form["clientDisconnectReason"],
+                "MDX_SESSION_DISCONNECT_REASON_DISCONNECTED_BY_USER"
+            );
+            assert!(request.reply.is_some());
+            assert!(devices.insert(request.device.clone()));
+            pending.push(request);
+        }
+        assert_eq!(
+            devices,
+            BTreeSet::from(["screen-a".to_owned(), "screen-b".to_owned()])
+        );
+
+        // Both real TCP requests are blocked before pausing. A serial shutdown
+        // cannot substitute two three-second budgets for the supervisor's one.
+        tokio::time::pause();
+        let paused_at = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let still_pending = !service.is_finished();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let stopped = tokio::time::timeout(Duration::from_millis(1), &mut service).await;
+        joined = stopped.is_ok();
+        let elapsed = paused_at.elapsed();
+        // Resume before assertions or waiting for the TCP EOF notifications.
+        tokio::time::resume();
+        assert!(
+            still_pending,
+            "blocked termination returned before its deadline"
+        );
+        assert!(elapsed <= Duration::from_millis(3001));
+        stopped
+            .expect("both devices must stop within one three-second budget")
+            .unwrap()
+            .unwrap();
+        for request in pending {
+            request.cancelled().await;
+        }
+        fixture.no_requests().await;
+    })
+    .catch_unwind()
+    .await;
+
+    shutdown.cancel();
+    if !joined {
+        service.abort();
+        let _ = service.await;
+    }
+    fixture.stop().await;
+    outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }

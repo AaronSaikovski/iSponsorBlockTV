@@ -116,9 +116,11 @@ incorporated-code notices under `/app/`.
 ```sh
 cargo build --locked
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+### Tests and QA
 
 Run a focused contract or the synthetic end-to-end scenario:
 
@@ -132,6 +134,30 @@ The last two commands exercise the same fixture-backed application scenario.
 Tests use Rust's built-in harness, Tokio, local HTTP/UDP/TLS services, temporary
 configuration directories, and Ratatui's test backend. They need local sockets
 and child-process support, but not paired TVs or production credentials.
+
+The full `cargo test --locked` command discovers unit tests, integration contracts,
+and documentation tests. Use `cargo test --locked -- --list` to inspect the inventory.
+
+| Contract suite (`tests/`) | Behavior protected |
+| --- | --- |
+| `config_contract` | Lossless JSON, validation, path precedence, atomic saves and failure recovery |
+| `cli_contract`, `setup_contract`, `tui_contract` | Native stdin cancellation with its pipe still open, explicit saves, pairing, stale results and terminal rendering |
+| `api_contract` | Request formats, cache isolation, proxy policy, the 1 MiB decompressed-body boundary, deadlines and secret redaction |
+| `sponsorblock_contract` | Segment merging, expiry, shared lookups, cancellation and reporting |
+| `lounge_contract` | Session identity, command ordering, streaming frames and interrupted reads |
+| `runtime_contract` | Multi-device control, stale completions, shared lookups surviving one device's video change, and one shared three-second shutdown deadline |
+| `discovery_contract`, `cast_contract` | LAN confinement, launch policy, protocol limits and cancellation |
+| `native_e2e` | Fixture-backed setup-to-playback application flow |
+
+Source-adjacent unit tests additionally cover scheduler boundaries, protocol
+parsing, discovery budgets, and setup-client reuse. Subprocess helper tests are
+driven by their parent tests to isolate native I/O and proxy environments.
+
+**Verification snapshot:** the test-coverage update passed locally on macOS ARM64
+with Rust 1.99.1: **221 tests passed, zero failed or ignored**, plus isolated
+subprocess checks. Clippy passed across all targets with warnings denied.
+Linux and Windows are configured in the CI matrix but were not executed as part
+of this local verification.
 
 These tests do not certify physical devices, live API behavior, LAN multicast,
 or real terminal lifecycle behavior. Verify those separately when changing the

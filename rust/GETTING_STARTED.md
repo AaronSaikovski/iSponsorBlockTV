@@ -8,13 +8,18 @@ A YouTube API key is not needed for pairing or ordinary SponsorBlock skipping.
 It is needed for the channel whitelist. Internet access to YouTube and
 SponsorBlock is required; manual TV-code pairing does not require LAN discovery.
 
+Before deployment, read the [dependency security warning](README.md#dependency-security).
+It records an unresolved vendored OpenSSL advisory affecting Linux builds,
+including Docker. Passing tests or rebuilding the same lockfile does not resolve it.
+
 ## Option A: Run locally
 
 ### Prerequisites
 
 - Install Rust through rustup, including Cargo. The source checkout selects
   Rust **1.99.1** through `rust/rust-toolchain.toml`.
-- Linux: install a C compiler, make and Perl for vendored OpenSSL builds.
+- Linux: install a C compiler, make and Perl for vendored OpenSSL builds, plus
+  your distribution's CA certificate bundle (usually `ca-certificates`) for HTTPS.
 - macOS: install Xcode Command Line Tools (`xcode-select --install`). If Homebrew
   Rust is also installed, use rustup first: `export PATH="$HOME/.cargo/bin:$PATH"`.
 - Windows: install Visual Studio Build Tools with the C++ build tools and Windows
@@ -63,12 +68,18 @@ In Windows PowerShell:
 .\target\release\iSponsorBlockTV.exe --data .\data start
 ```
 
-The service runs in the foreground; leave it running while watching TV. Logs go
-to the terminal's stderr. Add `--debug` before `start` for detailed diagnostics:
+The service runs in the foreground; leave it running while watching TV. Info-level
+logs go to stderr by default and show startup/shutdown, device connections/retries,
+and accepted SponsorBlock seek requests. Device numbers follow configuration order;
+these messages omit screen IDs, video IDs, keys and URLs.
+Add `--debug` before `start` for detailed diagnostics:
 
 ```sh
 cargo run --locked --release -- --data ./data --debug start
 ```
+
+For HTTP diagnostics, use `--debug --http-tracing start`. Both flags are needed
+to display redacted HTTP records; review the output before sharing it.
 
 Use **Ctrl-C** to stop. Setup does not start a background playback service, and
 these commands do not install an operating-system startup service.
@@ -156,6 +167,7 @@ In the same shell, with both variables still exported:
 
 ```sh
 docker compose up -d
+docker compose ps
 docker compose logs --tail=100 -f isponsorblocktv-rust
 ```
 
@@ -172,8 +184,34 @@ host directory. Preserve `ISPBTV_RUST_IMAGE` and `ISPBTV_RUST_DATA_DIR` for futu
 Compose invocations, either by exporting them again or setting them in a local
 `rust/.env` file. Use an absolute storage path there; keep `.env` and data private.
 
-To change settings, stop the service, repeat the interactive setup command with
-the same image and mount, save, then run `docker compose up -d` again.
+Compose reads `.env` itself; the direct `docker run` commands above still need
+exported shell variables. Exported values override `.env`, so update or unset
+them when changing the image or storage path.
+
+To change settings, use Compose so the setup container receives the same image
+and mount, whether they come from `.env` or your shell:
+
+```sh
+docker compose stop
+docker compose run --rm --no-deps isponsorblocktv-rust setup-cli
+docker compose up -d
+```
+
+Save explicitly before exiting setup. Read the prompt-default warning under
+[Pair and save](#pair-and-save) before reconfiguring an existing installation.
+
+### Debug in the foreground
+
+Stop the background controller first to avoid controlling the same TV twice:
+
+```sh
+docker compose stop
+docker compose run --rm --no-deps isponsorblocktv-rust --debug --http-tracing start
+```
+
+Here, Ctrl-C stops the one-off service, not just log following. Afterwards, use
+`docker compose up -d` to resume normal background operation. Omit `--http-tracing`
+when ordinary debug logs are sufficient; the image does not need a shell for either.
 
 ### Update the container
 
@@ -211,9 +249,9 @@ the same TV at once.
 | Enter skip categories | **`sponsor`** to skip sponsored segments |
 | Whitelist channels? | `n` for basic setup |
 | Specify a minimum segment length? | `n` to leave it unchanged |
-| Report skipped segments? | Choose whether to send skipped segment UUIDs to SponsorBlock |
+| Report skipped segments? | Defaults to `y`; choose `n` to disable reporting segment UUIDs to SponsorBlock |
 | Mute / skip native YouTube ads? | Choose each option; both prompts default to no |
-| Enable autoplay? | Choose your preference |
+| Enable autoplay? | Defaults to `y`; choose your preference |
 | SponsorBlock API URL | Enter for the default service |
 | Save this configuration? | **`y`** |
 
@@ -225,16 +263,25 @@ Successful pairing prints `Paired device: ...`; continue until the final save.
 Look for `Config saved to ...` or `Config unchanged at ...`. Pairing alone, EOF,
 or interruption does not implicitly save the draft.
 
+**When rerunning `setup-cli`, defaults are not your saved preferences.** Proxy,
+reporting, ad controls, autoplay and SponsorBlock URL prompts use fixed defaults.
+Pressing Enter through them and saving can reset earlier choices. Select each
+desired value explicitly; blank at the URL prompt selects the default service,
+not your previous custom URL.
+
 `--data` takes a **directory**, not a JSON filename. Keep configuration private:
 it contains device identifiers and may contain API keys. Do not commit it.
 
 ## Verify first playback
 
-Start your local service or Compose container, then play a video on the paired TV
-with a known SponsorBlock segment in a selected category. Skipping depends on
-community segment data; not every video contains a matching segment. Check logs
-if the expected skip does not occur. Stop other Python or Rust controllers for
-that device before testing.
+1. Stop other Python or Rust controllers for the device, then start your local
+   service or Compose container. Check for a device connection in the logs;
+   process startup or a running container alone does not prove a connection.
+2. Play a video on the paired TV with a known SponsorBlock segment in a selected
+   category. Matching community segment data must exist; not every video has it.
+3. Watch the TV confirm the skip. An accepted-seek log means YouTube accepted the
+   request, not proof that the TV completed it. If nothing happens, inspect logs
+   and the settings below before changing pairing.
 
 ## Troubleshooting
 
@@ -245,13 +292,17 @@ that device before testing.
 | No configured devices | Answer `y` to Add more, pair successfully, and confirm the final save |
 | Config not found | Use the same data directory; local relative paths depend on your working directory |
 | Container keeps restarting | Inspect `docker compose logs`; check the mount, saved devices, and config validation errors |
+| Container runs but nothing connects | Open YouTube on the paired TV; inspect connection/retry logs and internet/proxy access |
 | GHCR pull denied or tag missing | Confirm a successful release, correct owner/tag, and package visibility/login |
 | Sponsor segments not skipped | Check categories, segment availability, minimum length, whitelist, and that the service is running |
 | TUI refuses to start | Use an interactive terminal or switch to `setup-cli` |
 | Discovery finds nothing | Pair manually; discovery needs LAN access and multicast support |
 | E0514 compiler mismatch | Put rustup first on `PATH`; set `CARGO_TARGET_DIR=target/rustup-native` and rebuild; direct executables then live under that directory |
 | Existing config fails validation | Back it up and correct it through setup; saved drafts can still be incomplete for startup |
+| Malformed JSON cannot open in setup | Restore a valid backup; setup deliberately refuses to overwrite malformed configuration |
+| Preferences change after rerunning prompt setup | Explicitly answer fixed-default prompts before saving; Enter does not always retain saved values |
 
 Review logs before sharing them; do not share TV codes, screen IDs, API keys or
 configuration files. See the [Rust README](README.md) for CI, release platforms,
-architecture and development commands.
+architecture and [tests and QA](README.md#tests-and-qa). Automated loopback tests
+do not replace this physical-device playback check.
