@@ -15,9 +15,11 @@ Docker image/service names when changing executable references.
 
 ## Architecture & Data Flow
 
-- `main.rs` parses Clap arguments, initializes tracing and signal cancellation,
-  then calls `lib.rs::run_app`. `AppContext` injects environment, endpoints,
-  shutdown, and optional prompt I/O; keep these dependencies explicit.
+- `main.rs` parses Clap arguments and captures signal cancellation, then loads one
+  configuration snapshot through `PreparedApp::load`. It initializes tracing from
+  the effective log level before calling `lib.rs::run_app(PreparedApp)`.
+  `AppContext` injects environment, endpoints, shutdown, and optional prompt I/O;
+  reusable application code does not install a global subscriber.
 - `config.rs` separates lossless editable `ConfigDocument` from validated
   `RuntimeConfig`. Setup edits drafts and saves explicitly through `ConfigStore`;
   runtime validation must not rewrite configuration. Saves use a same-directory
@@ -30,8 +32,8 @@ Docker image/service names when changing executable references.
   stale completions. Discovery coordinates bounded DIAL/Cast probes separately
   from ordinary cloud-mediated playback control.
 
-For protocol, platform, or ownership changes, consult the native Rust section of
-`../ARCHITECTURE.md`; earlier sections mainly describe Python.
+For protocol, platform, logging, or ownership changes, consult
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for native Rust invariants and verification boundaries.
 
 ## Key Directories
 
@@ -59,7 +61,8 @@ cargo run --locked -- --data ./data --debug start
 ```
 
 Omitting the subcommand defaults to `start`. `setup` requires an interactive terminal;
-use `setup-cli` for piped input. `--http-tracing` needs `--debug` for visibility.
+use `setup-cli` for piped input. For verbosity and safe config-editing procedures,
+see `README.md#configuration` and `GETTING_STARTED.md#configure-log-verbosity`.
 Use a dedicated data directory when testing setup or migrating Python config.
 
 Build the source container **from the parent repository root**:
@@ -76,6 +79,16 @@ selects that local image; otherwise Compose selects the published image referenc
 - Use rustfmt, snake_case functions/modules, PascalCase types, typed `thiserror`
   errors, and `tracing`. Preserve upstream wire field names and redact credentials,
   URLs and payloads in errors/logs; use the centralized `http.rs` transports.
+- Logging accepts optional top-level `log_level`: lowercase `off`, `error`,
+  `warn`, `info`, `debug`, or `trace`, defaulting to `info` when absent. Reject
+  invalid types/values with redacted field-path errors. `--debug` overrides the
+  configured level for one run. Keep third-party logs disabled using
+  `off,isponsorblocktv=LEVEL`; HTTP traces require `--http-tracing` plus an
+  effective `debug`/`trace` level.
+- Attribute runtime logs by device number in configuration order. Log native ad
+  detection once per observed episode and log its observed end; repeated ad
+  events must not flood notifications. Describe accepted seeks as request
+  acceptance, not proof of completed TV action.
 - Keep async work cancellation-aware with `CancellationToken`, tracked tasks,
   bounded channels, and explicit shutdown. Shared services use `Arc` and bounded
   mutex-protected caches; release cache locks before network awaits.

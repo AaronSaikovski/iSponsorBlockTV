@@ -66,6 +66,24 @@ whitelist requires a YouTube API key. Device offsets in JSON are milliseconds.
 Treat configuration as sensitive: it contains device identifiers and may contain
 API credentials. Do not commit your data directory.
 
+The optional top-level `log_level` accepts the lowercase strings `off`, `error`,
+`warn`, `info`, `debug`, or `trace`; omission defaults to `info`. Invalid values
+or non-string types are rejected with a redacted field-path error.
+This is a **fragment to merge into your existing configuration, not a complete
+config file**:
+
+```json
+{
+  "log_level": "info"
+}
+```
+
+Stop the controller and back up `config.json` before editing; preserve all other
+fields and restart to load the change. Locally, stop with Ctrl-C, edit the file
+in your `--data` directory, then rerun your start command. With Docker, run
+`docker compose stop`, edit `config.json` in the host data directory
+(`ISPBTV_RUST_DATA_DIR`, default `./data`), then `docker compose up -d`.
+
 ### Diagnostics
 
 ```sh
@@ -74,12 +92,20 @@ cargo run --locked -- --data ./data --debug start
 cargo run --locked -- --data ./data --debug --http-tracing start
 ```
 
-Logs go to stderr at info level by default: service startup/shutdown, device
-connections/reconnects, and accepted SponsorBlock seeks. Device numbers follow
-configuration order; these messages omit screen IDs, video IDs, keys and URLs.
-`--debug` enables additional diagnostics. HTTP tracing also requires
-`--http-tracing` and uses redacted transport records. Review logs before sharing
-them. With Docker, use `docker compose logs -f isponsorblocktv-rust`.
+Logs go to stderr at the configured level (default `info`). Info messages cover
+service startup/shutdown, device connections/reconnects, accepted SponsorBlock
+seek requests, and native YouTube ad detection/end. Ad detection is logged once
+per observed ad episode rather than on every repeated ad event. Device numbers
+follow configuration order; these messages omit screen IDs, video IDs, keys and
+URLs. An accepted seek confirms request acceptance, not that the TV completed
+the action.
+
+`--debug` overrides `log_level` with `debug` for that run, without editing the
+file. Third-party logs remain disabled. HTTP records require the opt-in
+`--http-tracing` flag **and** an effective level of `debug` or `trace` (configured
+in JSON or selected with `--debug`); the flag alone at `info` does not show them.
+HTTP transport records are redacted, but review logs before sharing them.
+With Docker, use `docker compose logs -f isponsorblocktv-rust`.
 
 ## Docker
 
@@ -216,7 +242,7 @@ until API-key or proxy settings change.
 | `tests/` | Behavioral contracts and local fixtures |
 
 See [repository guidelines](AGENTS.md) for implementation invariants and the
-native Rust section of [the architecture document](../ARCHITECTURE.md) for details.
+[Rust architecture document](ARCHITECTURE.md) for ownership and data-flow details.
 
 ### Linux cross-compilation
 

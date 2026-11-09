@@ -1,5 +1,5 @@
 use isponsorblocktv::{
-    AppContext,
+    AppContext, PreparedApp,
     cli::{Cli, Command},
     config::{ConfigStore, Environment},
     http::Endpoints,
@@ -76,7 +76,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let prompt = PromptIo::new(Cursor::new(input.to_vec()), tokio::io::sink());
     tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        run_app(
+        run_app(PreparedApp::load(
             Cli {
                 data: Some(root.path().to_owned()),
                 debug: false,
@@ -91,7 +91,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 shutdown: CancellationToken::new(),
                 prompt: Some(prompt),
             },
-        ),
+        )?),
     )
     .await??;
     let (_, document) = ConfigStore::load(root.path().to_owned(), false)?;
@@ -140,7 +140,7 @@ async fn run_service(data_dir: &std::path::Path) -> Result<(), Box<dyn std::erro
     let mut environment = Environment::capture()?;
     environment.docker = false;
     let shutdown = CancellationToken::new();
-    let service = tokio::spawn(run_app(
+    let service = tokio::spawn(run_app(PreparedApp::load(
         Cli {
             data: Some(data_dir.to_owned()),
             debug: false,
@@ -155,7 +155,7 @@ async fn run_service(data_dir: &std::path::Path) -> Result<(), Box<dyn std::erro
             shutdown: shutdown.clone(),
             prompt: None,
         },
-    ));
+    )?));
     fixture.subscribed("screen-a").await;
     fixture.subscribed("screen-b").await;
     fixture

@@ -860,6 +860,14 @@ impl DeviceActor {
     }
 
     fn ad(&mut self, skip_enabled: bool) {
+        if !self.ad_active {
+            tracing::info!(
+                skip_enabled,
+                skip_ads = self.config.skip_ads,
+                mute_ads = self.config.mute_ads,
+                "YouTube advertisement detected"
+            );
+        }
         self.ad_active = true;
         self.queue
             .retain(|queued| !matches!(queued.command, Command::SetVolume { muted: false, .. }));
@@ -879,6 +887,9 @@ impl DeviceActor {
     }
 
     fn restore_mute(&mut self) {
+        if self.ad_active {
+            tracing::info!("YouTube advertisement ended; returning to content");
+        }
         self.ad_active = false;
         self.queue.retain(|queued| {
             !matches!(

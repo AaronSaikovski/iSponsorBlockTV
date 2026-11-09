@@ -11,7 +11,7 @@ pub mod runtime;
 pub mod setup;
 
 use cli::{Cli, Command};
-use config::{ConfigError, ConfigStore, Environment, resolve_data_dir};
+use config::{ConfigDocument, ConfigError, ConfigStore, Environment, LogLevel, resolve_data_dir};
 use http::Endpoints;
 use setup::{PromptIo, SetupError};
 use tokio_util::sync::CancellationToken;
@@ -33,9 +33,50 @@ pub enum AppError {
     Runtime(#[from] runtime::RuntimeError),
 }
 
-pub async fn run_app(cli: Cli, mut context: AppContext) -> Result<(), AppError> {
-    let data_dir = resolve_data_dir(cli.data.as_deref(), &context.environment)?;
-    let (store, mut document) = ConfigStore::load(data_dir, context.environment.docker)?;
+/// A single loaded configuration snapshot and its explicitly injected services.
+/// Prepare before installing the binary's subscriber, so spawned actors share
+/// the configured process-wide filter without reusable code installing one.
+pub struct PreparedApp {
+    cli: Cli,
+    context: AppContext,
+    store: ConfigStore,
+    document: ConfigDocument,
+    log_level: LogLevel,
+}
+
+impl PreparedApp {
+    pub fn load(cli: Cli, context: AppContext) -> Result<Self, AppError> {
+        let data_dir = resolve_data_dir(cli.data.as_deref(), &context.environment)?;
+        let (store, document) = ConfigStore::load(data_dir, context.environment.docker)?;
+        let configured_level = document.log_level()?;
+        let log_level = if cli.debug {
+            LogLevel::Debug
+        } else {
+            configured_level
+        };
+        Ok(Self {
+            cli,
+            context,
+            store,
+            document,
+            log_level,
+        })
+    }
+
+    pub fn log_level(&self) -> LogLevel {
+        self.log_level
+    }
+}
+
+/// Run a prepared snapshot under the caller's existing tracing subscriber.
+pub async fn run_app(app: PreparedApp) -> Result<(), AppError> {
+    let PreparedApp {
+        cli,
+        mut context,
+        store,
+        mut document,
+        ..
+    } = app;
     match cli.selected_command() {
         Command::Setup => {
             drop(context.prompt);

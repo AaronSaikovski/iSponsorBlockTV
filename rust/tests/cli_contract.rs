@@ -172,6 +172,204 @@ fn legacy_precedence_and_noninteractive_terminal_are_preserved() {
     );
 }
 
+#[test]
+fn invalid_log_levels_fail_before_setup_even_with_debug_without_exposing_values() {
+    for arguments in [vec!["setup-cli"], vec!["--debug", "setup-cli"]] {
+        let data = tempfile::tempdir().unwrap();
+        let path = data.path().join("config.json");
+        let original = br#"{"log_level":"sensitive-invalid-level"}"#;
+        fs::write(&path, original).unwrap();
+        let output = binary()
+            .arg("--data")
+            .arg(data.path())
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("configuration field log_level:"));
+        assert!(!error.contains("sensitive-invalid-level"));
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+}
+
+// A subprocess permits a real global subscriber without affecting concurrent
+// tests. It uses the same prepared-app/filter seam as the binary, with injected
+// loopback endpoints rather than production services.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_logging_child_entry() {
+    use clap::Parser;
+    use isponsorblocktv::{
+        AppContext, PreparedApp,
+        cli::Cli,
+        config::{Environment, Platform},
+        http::{Endpoints, HttpClients},
+        run_app,
+    };
+
+    let Ok(arguments) = std::env::var("ISPBTV_LOGGING_TEST_ARGUMENTS") else {
+        return;
+    };
+    let arguments: Vec<String> = serde_json::from_str(&arguments).unwrap();
+    let cli = Cli::try_parse_from(arguments).unwrap();
+    let http_tracing = cli.http_tracing;
+    let data = cli.data.clone().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base: url::Url = format!("http://{}/", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let app = PreparedApp::load(
+        cli,
+        AppContext {
+            environment: Environment {
+                platform: Platform::Linux,
+                data_dir: None,
+                docker: false,
+                home: None,
+                xdg_data_home: None,
+                local_app_data: None,
+            },
+            endpoints: Endpoints {
+                lounge: base.clone(),
+                youtube: base.clone(),
+                sponsorblock: base.clone(),
+            },
+            shutdown,
+            prompt: None,
+        },
+    )
+    .unwrap();
+    tracing_subscriber::fmt()
+        .with_env_filter(app.log_level().filter())
+        .with_ansi(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .init();
+
+    // Run after the snapshot's on-disk source becomes invalid: startup must
+    // neither reload it nor depend on it after selecting the logging level.
+    fs::write(data.join("config.json"), b"{invalid-after-preparation").unwrap();
+    tokio::spawn(async {
+        tracing::error!(target: "isponsorblocktv::logging_contract", "severity probe");
+        tracing::warn!(target: "isponsorblocktv::logging_contract", "severity probe");
+        tracing::info!(target: "isponsorblocktv::logging_contract", "severity probe");
+        tracing::debug!(target: "isponsorblocktv::logging_contract", "severity probe");
+        tracing::trace!(target: "isponsorblocktv::logging_contract", "severity probe");
+        tracing::error!(target: "reqwest::logging_contract", "dependency probe");
+    })
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(10), async {
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+                assert!(request.len() < 8192);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let clients = HttpClients::new(false, http_tracing).unwrap();
+        let request = clients.cloud.request(reqwest::Method::GET, base);
+        assert_eq!(clients.cloud.execute(request).await.unwrap().status, 200);
+        server.await.unwrap();
+        run_app(app).await.unwrap();
+    })
+    .await
+    .expect("loopback logging scenario must finish");
+}
+
+#[test]
+fn configured_levels_filter_runtime_children_and_opt_in_http_traces() {
+    // Expected severities are independent literal thresholds, not filter strings.
+    for (level, debug, expected) in [
+        (None, false, &["ERROR", "WARN", "INFO"][..]),
+        (Some("off"), false, &[][..]),
+        (Some("error"), false, &["ERROR"][..]),
+        (Some("warn"), false, &["ERROR", "WARN"][..]),
+        (Some("info"), false, &["ERROR", "WARN", "INFO"][..]),
+        (
+            Some("debug"),
+            false,
+            &["ERROR", "WARN", "INFO", "DEBUG"][..],
+        ),
+        (
+            Some("trace"),
+            false,
+            &["ERROR", "WARN", "INFO", "DEBUG", "TRACE"][..],
+        ),
+        (Some("off"), true, &["ERROR", "WARN", "INFO", "DEBUG"][..]),
+        (Some("trace"), true, &["ERROR", "WARN", "INFO", "DEBUG"][..]),
+    ] {
+        for http_tracing in [false, true] {
+            let data = tempfile::tempdir().unwrap();
+            let mut config = serde_json::json!({
+                "devices": [{"screen_id": "synthetic-screen"}]
+            });
+            if let Some(level) = level {
+                config["log_level"] = serde_json::json!(level);
+            }
+            fs::write(
+                data.path().join("config.json"),
+                serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            let mut arguments = vec![
+                "isponsorblocktvrust".to_owned(),
+                "--data".to_owned(),
+                data.path().to_str().unwrap().to_owned(),
+            ];
+            if debug {
+                arguments.push("--debug".into());
+            }
+            if http_tracing {
+                arguments.push("--http-tracing".into());
+            }
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "configured_logging_child_entry", "--nocapture"])
+                .env(
+                    "ISPBTV_LOGGING_TEST_ARGUMENTS",
+                    serde_json::to_string(&arguments).unwrap(),
+                )
+                .env("RUST_LOG", "trace")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let logs = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{logs}");
+            let actual: Vec<_> = logs
+                .lines()
+                .filter(|line| line.contains("isponsorblocktv::logging_contract:"))
+                .map(|line| line.split_whitespace().next().unwrap())
+                .collect();
+            assert_eq!(actual, expected, "level={level:?}, debug={debug}");
+            assert!(!logs.contains("reqwest::logging_contract:"));
+            let runtime_logged = logs.lines().any(|line| {
+                line.contains("isponsorblocktv::runtime:")
+                    && line.split_whitespace().next() == Some("INFO")
+            });
+            let actor_logged = logs.lines().any(|line| {
+                line.contains("isponsorblocktv::runtime::device:")
+                    && line.split_whitespace().next() == Some("INFO")
+            });
+            assert_eq!(runtime_logged, expected.contains(&"INFO"));
+            assert_eq!(actor_logged, expected.contains(&"INFO"));
+            let http_logged = logs.lines().any(|line| {
+                line.contains("isponsorblocktv::http:")
+                    && line.split_whitespace().next() == Some("DEBUG")
+                    && line.contains("status=200")
+            });
+            assert_eq!(http_logged, http_tracing && expected.contains(&"DEBUG"));
+        }
+    }
+}
+
 // Keep stdin outside Child: wait() otherwise closes it before waiting, which
 // would turn this regression into an EOF test and hide a blocked-worker join.
 struct OpenStdinChild {

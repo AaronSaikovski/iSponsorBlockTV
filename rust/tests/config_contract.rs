@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use isponsorblocktv::config::{
     ConfigDocument, ConfigError, ConfigStore, ConfigWarning, DEFAULT_SPONSORBLOCK_API_URL,
-    Environment, Platform, SaveOutcome, resolve_data_dir,
+    Environment, LogLevel, Platform, SaveOutcome, resolve_data_dir,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -63,6 +63,7 @@ fn every_runtime_default_is_compatible_and_conversion_does_not_mutate() {
     let document = paired();
     let before = document.clone();
     let runtime = document.runtime_config().unwrap();
+    assert_eq!(runtime.log_level, LogLevel::Info);
     assert_eq!(runtime.devices.len(), 1);
     assert_eq!(runtime.devices[0].screen_id, "synthetic-screen");
     assert_eq!(runtime.devices[0].name, None);
@@ -84,6 +85,54 @@ fn every_runtime_default_is_compatible_and_conversion_does_not_mutate() {
     );
     assert!(runtime.warnings.is_empty());
     assert_eq!(document, before);
+}
+
+#[test]
+fn log_levels_are_strict_lossless_and_default_to_info() {
+    assert_eq!(
+        ConfigDocument::default().log_level().unwrap(),
+        LogLevel::Info
+    );
+    for (value, expected) in [
+        ("off", LogLevel::Off),
+        ("error", LogLevel::Error),
+        ("warn", LogLevel::Warn),
+        ("info", LogLevel::Info),
+        ("debug", LogLevel::Debug),
+        ("trace", LogLevel::Trace),
+    ] {
+        let mut document = paired();
+        document.0.insert("log_level".into(), json!(value));
+        let before = document.clone();
+        assert_eq!(document.log_level().unwrap(), expected);
+        assert_eq!(document.runtime_config().unwrap().log_level, expected);
+        assert_eq!(document, before);
+        let serialized = serde_json::to_value(&document).unwrap();
+        assert_eq!(serialized["log_level"], value);
+    }
+}
+
+#[test]
+fn invalid_log_levels_report_only_the_field_and_fixed_reason() {
+    for value in [
+        json!(null),
+        json!(true),
+        json!(42),
+        json!([]),
+        json!({"secret": "sensitive-value"}),
+        json!(""),
+        json!("INFO"),
+        json!("warning"),
+        json!(" info"),
+        json!("sensitive-value"),
+    ] {
+        let mut document = paired();
+        document.0.insert("log_level".into(), value);
+        assert_field(&document, "log_level");
+        let error = document.log_level().unwrap_err();
+        assert!(matches!(&error, ConfigError::Field { path, .. } if path == "log_level"));
+        assert!(!format!("{error:?} {error}").contains("sensitive-value"));
+    }
 }
 
 #[test]

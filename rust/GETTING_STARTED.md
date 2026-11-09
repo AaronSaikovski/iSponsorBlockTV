@@ -76,16 +76,21 @@ In Windows PowerShell:
 
 The service runs in the foreground; leave it running while watching TV. Info-level
 logs go to stderr by default and show startup/shutdown, device connections/retries,
-and accepted SponsorBlock seek requests. Device numbers follow configuration order;
-these messages omit screen IDs, video IDs, keys and URLs.
-Add `--debug` before `start` for detailed diagnostics:
+accepted SponsorBlock seek requests, and native YouTube ad detection/end.
+Detection produces one notification per observed ad episode, not one per repeated
+ad event. Device numbers follow configuration order; these messages omit screen
+IDs, video IDs, keys and URLs. Accepted seeks do not prove actual TV action.
+Add `--debug` before `start` to override the configured level with `debug` for
+this run:
 
 ```sh
 cargo run --locked --release -- --data ./data --debug start
 ```
 
-For HTTP diagnostics, use `--debug --http-tracing start`. Both flags are needed
-to display redacted HTTP records; review the output before sharing it.
+For HTTP diagnostics, use `--debug --http-tracing start`, or configure `log_level`
+as `debug` or `trace` and pass `--http-tracing start`. HTTP records need both the
+opt-in flag and an effective debug/trace level; they remain hidden at info.
+Third-party logs stay disabled. Review redacted output before sharing it.
 
 Use **Ctrl-C** to stop. Setup does not start a background playback service, and
 these commands do not install an operating-system startup service.
@@ -94,6 +99,27 @@ To update a source installation, stop the process, back up the data directory,
 update your checkout to the desired release, rebuild with `--locked --release`,
 and start with the same `--data` directory. Stop before re-running setup to avoid
 editing configuration underneath a running controller; restart to load changes.
+
+### Configure log verbosity
+
+The optional top-level `config.json` field `log_level` accepts lowercase `off`,
+`error`, `warn`, `info`, `debug`, or `trace`. Missing means `info`; invalid values
+and non-string types fail validation with a redacted field-path error.
+`--debug` takes precedence for one run and does not change the saved setting.
+
+**Configuration fragment only—not a complete config file.** Merge this field
+into the existing object while preserving your devices and all other settings:
+
+```json
+{
+  "log_level": "debug"
+}
+```
+
+For a local service, press Ctrl-C and wait for it to stop, back up and edit
+`config.json` inside your `--data` directory, then rerun the same start command.
+Changes take effect on restart, not while the service is running. For Docker,
+follow the stop/edit/restart procedure below.
 
 ### Use a release binary instead
 
@@ -207,6 +233,12 @@ docker compose up -d
 Save explicitly before exiting setup. Read the prompt-default warning under
 [Pair and save](#pair-and-save) before reconfiguring an existing installation.
 
+To edit `log_level` directly, run `docker compose stop`, back up and edit
+`config.json` in the **host** bind-mounted data directory
+(`ISPBTV_RUST_DATA_DIR`, default `./data`), then run `docker compose up -d`.
+Preserve all other fields; the fragment above must not replace the full file.
+Use the same image and data-directory environment settings for stop and restart.
+
 ### Debug in the foreground
 
 Stop the background controller first to avoid controlling the same TV twice:
@@ -218,7 +250,9 @@ docker compose run --rm --no-deps isponsorblocktv-rust --debug --http-tracing st
 
 Here, Ctrl-C stops the one-off service, not just log following. Afterwards, use
 `docker compose up -d` to resume normal background operation. Omit `--http-tracing`
-when ordinary debug logs are sufficient; the image does not need a shell for either.
+when ordinary debug logs are sufficient. If `log_level` is already `debug` or
+`trace`, omit `--debug` to retain that configured level; HTTP records still
+require `--http-tracing`. The image does not need a shell for either.
 
 ### Update the container
 

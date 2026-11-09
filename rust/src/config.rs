@@ -20,6 +20,32 @@ use url::Url;
 pub const DEFAULT_SPONSORBLOCK_API_URL: &str = "https://sponsor.ajay.app/api/";
 const RESERVED_KEYS: [&str; 2] = ["config_file", "data_dir"];
 
+/// Application logging severity. Dependency logging remains disabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogLevel {
+    Off,
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    /// Explicit directives prevent ambient RUST_LOG from enabling dependencies.
+    pub fn filter(self) -> &'static str {
+        match self {
+            Self::Off => "off,isponsorblocktv=off",
+            Self::Error => "off,isponsorblocktv=error",
+            Self::Warn => "off,isponsorblocktv=warn",
+            Self::Info => "off,isponsorblocktv=info",
+            Self::Debug => "off,isponsorblocktv=debug",
+            Self::Trace => "off,isponsorblocktv=trace",
+        }
+    }
+}
+
 /// The editable, untyped document. Unknown fields and JSON number precision are
 /// retained. Only reserved top-level path keys are excluded from persistence.
 #[derive(Clone, Default, PartialEq)]
@@ -142,6 +168,7 @@ impl fmt::Display for ConfigWarning {
 
 #[derive(Clone, PartialEq)]
 pub struct RuntimeConfig {
+    pub log_level: LogLevel,
     pub devices: Vec<RuntimeDevice>,
     pub apikey: String,
     pub skip_categories: Vec<String>,
@@ -166,6 +193,27 @@ impl fmt::Debug for RuntimeConfig {
 }
 
 impl ConfigDocument {
+    /// Validate logging independently of paired-device requirements, including
+    /// for setup commands. Explicit null is not a missing preference.
+    pub fn log_level(&self) -> Result<LogLevel, ConfigError> {
+        match self.0.get("log_level") {
+            None => Ok(LogLevel::default()),
+            Some(Value::String(value)) => match value.as_str() {
+                "off" => Ok(LogLevel::Off),
+                "error" => Ok(LogLevel::Error),
+                "warn" => Ok(LogLevel::Warn),
+                "info" => Ok(LogLevel::Info),
+                "debug" => Ok(LogLevel::Debug),
+                "trace" => Ok(LogLevel::Trace),
+                _ => Err(ConfigError::field(
+                    "log_level",
+                    "expected one of off, error, warn, info, debug, trace",
+                )),
+            },
+            Some(_) => Err(ConfigError::field("log_level", "expected a string")),
+        }
+    }
+
     /// Validate for service startup, including migration and paired-device gates.
     /// Callers should display `RuntimeConfig::warnings` before starting devices.
     pub fn runtime_config(&self) -> Result<RuntimeConfig, ConfigError> {
@@ -276,6 +324,7 @@ impl ConfigDocument {
             sponsorblock_api_url.set_path(&path);
         }
         let runtime = RuntimeConfig {
+            log_level: self.log_level()?,
             devices,
             apikey,
             skip_categories,
