@@ -237,6 +237,100 @@ If a new version fails, select the prior image and recreate the service using
 compatible backed-up configuration as needed. Never run both versions against
 the same TV at once.
 
+### Raspberry Pi: build and run an ARM64 container
+
+Use an ARM64-capable Pi, such as a Raspberry Pi 4 or 5, with **64-bit Raspberry
+Pi OS** and Docker Engine, the Compose plugin, and Buildx installed. Rust is
+compiled inside the image; you do not need Cargo installed on the Pi.
+
+Check the OS and Docker daemon architecture on the Pi:
+
+```sh
+uname -m
+dpkg --print-architecture
+docker info --format '{{.Architecture}}'
+docker compose version
+docker buildx version
+```
+
+Expect `aarch64`/`arm64` and Debian architecture `arm64`. A 64-bit CPU alone is
+not sufficient: **32-bit Raspberry Pi OS (`armhf`) is not supported by this
+source Docker build or the published Docker images**. The separate ARMv6/ARMv7
+release binaries do not imply 32-bit container support.
+
+#### Build directly on the Pi
+
+Copy or clone the repository onto the Pi. From its **parent repository root**
+(the directory containing `rust/`), run:
+
+```sh
+docker buildx build --platform linux/arm64 --load \
+  -f rust/Dockerfile -t isponsorblocktv-rust:pi .
+docker image inspect isponsorblocktv-rust:pi --format '{{.Os}}/{{.Architecture}}'
+docker run --rm --network=none isponsorblocktv-rust:pi --version
+```
+
+The image inspection should print `linux/arm64`; the executable should identify
+itself as `isponsorblocktvrust`. The first build compiles Rust dependencies and
+vendored OpenSSL, so allow sufficient free disk space and memory. If compilation
+is killed for lack of memory, build on a larger ARM64 machine instead.
+
+#### Alternatively, build elsewhere and transfer the image
+
+Run the same `docker buildx build --platform linux/arm64 --load ...` command
+above on your build machine, using the full repository as its context. An ARM64
+builder runs natively; an AMD64 builder needs ARM64 execution support because
+this Dockerfile runs the ARM64 compiler and executable during the build.
+Docker Desktop normally supplies emulation; check `docker buildx inspect --bootstrap`
+for `linux/arm64` support. Emulated compilation can be slow.
+
+Export the loaded ARM64 image and copy it to the Pi. Replace `your-user@your-pi`
+with your SSH login and hostname:
+
+```sh
+docker image save -o isponsorblocktv-rust-arm64.tar isponsorblocktv-rust:pi
+scp isponsorblocktv-rust-arm64.tar your-user@your-pi:~/
+```
+
+On the Pi, import and check it:
+
+```sh
+docker image load -i "$HOME/isponsorblocktv-rust-arm64.tar"
+docker image inspect isponsorblocktv-rust:pi --format '{{.Os}}/{{.Architecture}}'
+docker run --rm --network=none isponsorblocktv-rust:pi --version
+```
+
+The transfer contains the image, not your paired-device configuration. Keep a
+checkout on the Pi for `rust/compose.yml` and future rebuilds.
+
+#### Pair and start on the Pi
+
+From the checkout's **`rust/` directory on the Pi**, run:
+
+```sh
+export ISPBTV_RUST_IMAGE=isponsorblocktv-rust:pi
+export ISPBTV_RUST_DATA_DIR="$HOME/.local/share/isponsorblocktvrust"
+mkdir -p "$ISPBTV_RUST_DATA_DIR"
+docker compose run --rm --no-deps isponsorblocktv-rust setup-cli
+docker compose up -d
+docker compose logs --tail=100 -f isponsorblocktv-rust
+```
+
+Follow [Pair and save](#pair-and-save), including the final save confirmation.
+The explicit host data directory above is your deployment choice, not a change
+to the executable's default configuration location. Back it up and preserve both
+variables in your shell or `rust/.env` for later Compose commands.
+
+Manual TV-code pairing needs no published ports or host networking. Use it first;
+LAN discovery has additional multicast requirements. Stop any other controller
+for the same TV. For later changes, follow the Docker reconfiguration and update
+steps above; rebuild the `:pi` tag and use `docker compose up -d --force-recreate`
+for a local image rather than pulling it.
+
+These commands target ARM64 Linux; successful image/version checks are not
+physical Raspberry Pi or TV-playback certification. The
+[Linux dependency security warning](README.md#dependency-security) also applies.
+
 ## Pair and save
 
 1. On the TV or streaming device, open **YouTube → Settings → Link with TV code**.

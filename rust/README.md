@@ -83,6 +83,11 @@ them. With Docker, use `docker compose logs -f isponsorblocktv-rust`.
 
 ## Docker
 
+For Raspberry Pi, follow the [ARM64 build and deployment instructions](GETTING_STARTED.md#raspberry-pi-build-and-run-an-arm64-container).
+They cover building on a 64-bit Pi or transferring an ARM64 image from another
+machine, persistent storage, pairing, and Compose startup. The current Docker
+build requires 64-bit Pi OS; 32-bit `armhf` images are not provided.
+
 Build the native source image **from the parent repository root**, not this directory:
 
 ```sh
