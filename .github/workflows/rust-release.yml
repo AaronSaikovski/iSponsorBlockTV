@@ -1,0 +1,66 @@
+name: Release native Rust
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Require release tag to match Cargo version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          with open("rust/Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          expected = f"v{version}"
+          if os.environ["RELEASE_TAG"] != expected:
+              raise SystemExit(f"Rust release requires tag {expected}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\n")
+          PY
+
+  checks:
+    needs: version
+    uses: ./.github/workflows/rust-ci.yml
+
+  binaries:
+    needs: [version, checks]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/rust-release-binaries.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+      version: ${{ needs.version.outputs.version }}
+
+  container:
+    needs: [version, checks]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/rust-release-container.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+      version: ${{ needs.version.outputs.version }}
+      prerelease: ${{ github.event.release.prerelease }}

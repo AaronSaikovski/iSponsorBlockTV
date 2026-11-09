@@ -1,0 +1,502 @@
+# Getting started with isponsorblocktvrust
+
+Pair your TV's YouTube app, save its configuration, then leave the companion
+running while you watch. Choose **local Rust** or **Docker** below; both use the
+same pairing prompts and configuration format. Use only one controller per TV.
+
+The native executable is `isponsorblocktvrust` (`isponsorblocktvrust.exe` on
+Windows). Its Cargo package is `isponsorblocktvrust`; the library import remains
+`isponsorblocktv`. Existing config
+locations, environment variables, and Docker image/service names are unchanged;
+renaming the executable does not require moving configuration.
+
+A YouTube API key is not needed for pairing or ordinary SponsorBlock skipping.
+It is needed for the channel whitelist. Internet access to YouTube and
+SponsorBlock is required; manual TV-code pairing does not require LAN discovery.
+
+Before deployment, read the [dependency security warning](README.md#dependency-security).
+It records an unresolved vendored OpenSSL advisory affecting Linux builds,
+including Docker. Passing tests or rebuilding the same lockfile does not resolve it.
+
+The latest HTTP/Cast client-reuse and setup-allocation improvements are automatic.
+There are no new tuning flags, configuration migrations, or re-pairing steps.
+Keep your existing data directory: rebuild and restart a local installation, or
+follow [Update the container](#update-the-container) for Docker. See
+[runtime efficiency](README.md#runtime-efficiency) for the measured change;
+it is not a physical-device or Raspberry Pi performance guarantee.
+
+## Option A: Run locally
+
+### Prerequisites
+
+- Install Rust through rustup, including Cargo. The source checkout selects
+  Rust **1.99.1** through `rust/rust-toolchain.toml`.
+- Linux: install a C compiler, make and Perl for vendored OpenSSL builds, plus
+  your distribution's CA certificate bundle (usually `ca-certificates`) for HTTPS.
+- macOS: install Xcode Command Line Tools (`xcode-select --install`). If Homebrew
+  Rust is also installed, use rustup first: `export PATH="$HOME/.cargo/bin:$PATH"`.
+- Windows: install Visual Studio Build Tools with the C++ build tools and Windows
+  SDK. Run Cargo from a developer terminal with the MSVC toolchain available.
+
+Commands below assume your terminal is in the checkout's **`rust/` directory**.
+Use a separate data directory or backup when trying existing Python configuration.
+
+### Optional: start from the sample configuration
+
+[config.json.example](config.json.example) lists common settings using the
+application's current runtime defaults. Setup also works without copying it.
+For a new local installation, from `rust/` in a POSIX shell:
+
+```sh
+mkdir -p ./data
+cp -n config.json.example ./data/config.json
+```
+
+`cp -n` does not overwrite an existing configuration. On Windows, copy the file
+to your data directory as `config.json` only if that file does not already exist.
+For Docker or Raspberry Pi, copy it into your chosen host
+`ISPBTV_RUST_DATA_DIR` instead, before running the pairing container.
+
+The sample skips sponsor segments longer than one second, uses `info` logging,
+enables autoplay and viewed-segment reporting, and leaves ad muting/skipping
+disabled. Enable `mute_ads` and/or `skip_ads` if wanted; set
+`skip_count_tracking` to `false` to disable UUID reporting. Proxy use and channel
+whitelisting are off, so no API key is required.
+`use_proxy: true` opts cloud traffic into proxy environment variables; it does not
+create a proxy or route LAN discovery through one. See
+[proxy settings](README.md#proxy-settings), including Docker environment handling.
+
+The empty `devices` array is intentional: there are no invented credentials.
+Continue with setup, pair your TV, and explicitly save before starting the service.
+Do not replace an existing paired config with this sample.
+
+### Build and pair
+
+```sh
+cargo build --locked --release
+cargo run --locked --release -- --data ./data setup-cli
+```
+
+Follow [Pair and save](#pair-and-save) below. The configuration will be written to
+`rust/data/config.json` when you run from `rust/`.
+
+For a full-screen terminal interface instead of prompts:
+
+```sh
+cargo run --locked --release -- --data ./data setup
+```
+
+Choose **Add device**, enter the **Twelve-digit TV code**, select
+**Validate / retry**, then **Add paired device**. Configure preferences and save
+explicitly. Opening Add device starts active LAN discovery, which can launch
+YouTube on nearby devices even while the pairing-code tab is selected. Use
+`setup-cli` to pair manually without this discovery flow.
+
+### Start, inspect, and stop
+
+```sh
+cargo run --locked --release -- --data ./data start
+```
+
+Or run the already-built executable without Cargo:
+
+```sh
+./target/release/isponsorblocktvrust --data ./data start
+```
+
+In Windows PowerShell:
+
+```powershell
+.\target\release\isponsorblocktvrust.exe --data .\data start
+```
+
+The service runs in the foreground; leave it running while watching TV. Info-level
+logs go to stderr by default and show startup/shutdown, device connections/retries,
+accepted SponsorBlock seek requests, and native YouTube ad detection/end.
+Detection produces one notification per observed ad episode, not one per repeated
+ad event. Device numbers follow configuration order; these messages omit screen
+IDs, video IDs, keys and URLs. Accepted seeks do not prove actual TV action.
+Add `--debug` before `start` to override the configured level with `debug` for
+this run:
+
+```sh
+cargo run --locked --release -- --data ./data --debug start
+```
+
+For HTTP diagnostics, use `--debug --http-tracing start`, or configure `log_level`
+as `debug` or `trace` and pass `--http-tracing start`. HTTP records need both the
+opt-in flag and an effective debug/trace level; they remain hidden at info.
+Third-party logs stay disabled. Review redacted output before sharing it.
+
+Use **Ctrl-C** to stop. Setup does not start a background playback service, and
+these commands do not install an operating-system startup service.
+
+To update a source installation, stop the process, back up the data directory,
+update your checkout to the desired release, rebuild with `--locked --release`,
+and start with the same `--data` directory. Stop before re-running setup to avoid
+editing configuration underneath a running controller; restart to load changes.
+
+### Configure log verbosity
+
+The optional top-level `config.json` field `log_level` accepts lowercase `off`,
+`error`, `warn`, `info`, `debug`, or `trace`. Missing means `info`; invalid values
+and non-string types fail validation with a redacted field-path error.
+`--debug` takes precedence for one run and does not change the saved setting.
+
+**Configuration fragment only—not a complete config file.** Merge this field
+into the existing object while preserving your devices and all other settings:
+
+```json
+{
+  "log_level": "debug"
+}
+```
+
+For a local service, press Ctrl-C and wait for it to stop, back up and edit
+`config.json` inside your `--data` directory, then rerun the same start command.
+Changes take effect on restart, not while the service is running. For Docker,
+follow the stop/edit/restart procedure below.
+
+### Recover from a mixed Rust toolchain
+
+If Cargo or Clippy reports `E0514` / “compiled by an incompatible version of
+rustc”, check for a mixture of Homebrew and rustup executables or old build
+artifacts. Even matching version numbers can represent incompatible distributions.
+From `rust/`, use one rustup toolchain for Cargo, rustc, Clippy and rustdoc:
+
+```sh
+export PATH="$(dirname "$(rustup which rustc)"):$PATH"
+export RUSTC="$(rustup which rustc)"
+export RUSTDOC="$(rustup which rustdoc)"
+export CARGO_TARGET_DIR="$PWD/target/rustup-native"
+cargo build --locked --release
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+The separate target directory leaves existing artifacts intact. In that shell,
+Cargo commands use it automatically; direct executable commands must instead use
+`./target/rustup-native/release/isponsorblocktvrust`. These environment exports
+apply to the current shell; preserve them for subsequent builds or choose one
+toolchain consistently in your shell configuration.
+
+### Use a release binary instead
+
+After a native release is published, download the matching
+`isponsorblocktvrust-<version>-<target>` archive and `SHA256SUMS-rust.txt` from
+this repository's GitHub release. Match both OS and CPU architecture. Unix
+archives are `.tar.gz`; Windows archives are `.zip`. They include the executable,
+license and third-party notices; keep these together when redistributing.
+No Python or Rust compiler is required to run them.
+
+Verify the downloaded archive against its entry in the checksum file, then
+extract it. Linux can use `sha256sum <archive>`; macOS can use
+`shasum -a 256 <archive>`; PowerShell can use `Get-FileHash <archive> -Algorithm SHA256`.
+Run the extracted `isponsorblocktvrust` (`isponsorblocktvrust.exe` on Windows)
+with `--data ./data setup-cli`, then with `--data ./data start`. Host TLS trust
+certificates are still required on Linux.
+Availability depends on a successful release workflow; a configured workflow is
+not evidence that a downloadable release already exists.
+
+## Option B: Run in Docker
+
+Install Docker Engine or Docker Desktop with Linux containers and Docker Compose.
+The native image supports **Linux AMD64 and ARM64**. Docker commands below use a
+POSIX shell; on Windows, use WSL or adapt bind-mount paths to your shell.
+
+### Choose an image
+
+**Build locally:** from the checkout's **parent repository root**, run:
+
+```sh
+docker build -f rust/Dockerfile -t isponsorblocktv-rust:local .
+```
+
+Then change into `rust/` and select it:
+
+```sh
+export ISPBTV_RUST_IMAGE=isponsorblocktv-rust:local
+```
+
+**Use a published image:** after a successful native release, select its version
+tag. For example, if `v2.11.0` has been published by the upstream repository:
+
+```sh
+export ISPBTV_RUST_IMAGE=ghcr.io/dmunozv04/isponsorblocktv-rust:v2.11.0
+docker pull "$ISPBTV_RUST_IMAGE"
+```
+
+For a fork, use `ghcr.io/<owner>/<repository>-rust:<tag>`. Stable releases also
+publish `latest`; version tags make your deployment choice explicit. A private
+GHCR package requires `docker login ghcr.io` with credentials that can read it.
+The Rust workflow publishes to GHCR, not Docker Hub.
+
+### Create persistent storage and pair
+
+Run from **`rust/`**. Select one absolute host path and use it for both setup and
+the running service:
+
+```sh
+export ISPBTV_RUST_DATA_DIR="$PWD/data"
+mkdir -p "$ISPBTV_RUST_DATA_DIR"
+docker run --rm -it \
+  --mount "type=bind,src=$ISPBTV_RUST_DATA_DIR,dst=/app/data" \
+  "$ISPBTV_RUST_IMAGE" setup-cli
+```
+
+Follow [Pair and save](#pair-and-save). The `-it` flags allow interactive input;
+`--rm` removes the setup container afterwards, **not** the bind-mounted config.
+The resulting host file is `$ISPBTV_RUST_DATA_DIR/config.json`.
+
+The image has no shell: pass `setup-cli`, `setup`, or `start` directly after the
+image name. Do not try `docker exec ... sh`. Manual pairing avoids multicast
+requirements; automatic LAN discovery may require additional container network
+configuration. The supplied Compose file does not enable host networking.
+
+### Start, inspect, and stop
+
+In the same shell, with both variables still exported:
+
+```sh
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 -f isponsorblocktv-rust
+```
+
+Ctrl-C stops following logs, **not** the container. The Compose service uses
+`restart: unless-stopped`. To stop it or remove the container:
+
+```sh
+docker compose stop
+docker compose down
+```
+
+Your bind-mounted data survives both commands. Keep a backup; do not delete the
+host directory. Preserve `ISPBTV_RUST_IMAGE` and `ISPBTV_RUST_DATA_DIR` for future
+Compose invocations, either by exporting them again or setting them in a local
+`rust/.env` file. Use an absolute storage path there; keep `.env` and data private.
+
+Compose reads `.env` itself; the direct `docker run` commands above still need
+exported shell variables. Exported values override `.env`, so update or unset
+them when changing the image or storage path.
+
+To change settings, use Compose so the setup container receives the same image
+and mount, whether they come from `.env` or your shell:
+
+```sh
+docker compose stop
+docker compose run --rm --no-deps isponsorblocktv-rust setup-cli
+docker compose up -d
+```
+
+Save explicitly before exiting setup. Read the prompt-default warning under
+[Pair and save](#pair-and-save) before reconfiguring an existing installation.
+
+To edit `log_level` directly, run `docker compose stop`, back up and edit
+`config.json` in the **host** bind-mounted data directory
+(`ISPBTV_RUST_DATA_DIR`, default `./data`), then run `docker compose up -d`.
+Preserve all other fields; the fragment above must not replace the full file.
+Use the same image and data-directory environment settings for stop and restart.
+
+### Debug in the foreground
+
+Stop the background controller first to avoid controlling the same TV twice:
+
+```sh
+docker compose stop
+docker compose run --rm --no-deps isponsorblocktv-rust --debug --http-tracing start
+```
+
+Here, Ctrl-C stops the one-off service, not just log following. Afterwards, use
+`docker compose up -d` to resume normal background operation. Omit `--http-tracing`
+when ordinary debug logs are sufficient. If `log_level` is already `debug` or
+`trace`, omit `--debug` to retain that configured level; HTTP records still
+require `--http-tracing`. The image does not need a shell for either.
+
+### Update the container
+
+Back up the data directory. For a published image, set the desired new version
+in `ISPBTV_RUST_IMAGE` (or `.env`), then run:
+
+```sh
+docker compose pull
+docker compose up -d
+docker compose logs --tail=100 isponsorblocktv-rust
+```
+
+For a local image, rebuild from the parent root, then run
+`docker compose up -d --force-recreate` from `rust/`; do not pull a local-only tag.
+If a new version fails, select the prior image and recreate the service using
+compatible backed-up configuration as needed. Never run both versions against
+the same TV at once.
+
+### Raspberry Pi: build and run an ARM64 container
+
+Use an ARM64-capable Pi, such as a Raspberry Pi 4 or 5, with **64-bit Raspberry
+Pi OS** and Docker Engine, the Compose plugin, and Buildx installed. Rust is
+compiled inside the image; you do not need Cargo installed on the Pi.
+
+Check the OS and Docker daemon architecture on the Pi:
+
+```sh
+uname -m
+dpkg --print-architecture
+docker info --format '{{.Architecture}}'
+docker compose version
+docker buildx version
+```
+
+Expect `aarch64`/`arm64` and Debian architecture `arm64`. A 64-bit CPU alone is
+not sufficient: **32-bit Raspberry Pi OS (`armhf`) is not supported by this
+source Docker build or the published Docker images**. The separate ARMv6/ARMv7
+release binaries do not imply 32-bit container support.
+
+#### Build directly on the Pi
+
+Copy or clone the repository onto the Pi. From its **parent repository root**
+(the directory containing `rust/`), run:
+
+```sh
+docker buildx build --platform linux/arm64 --load \
+  -f rust/Dockerfile -t isponsorblocktv-rust:pi .
+docker image inspect isponsorblocktv-rust:pi --format '{{.Os}}/{{.Architecture}}'
+docker run --rm --network=none isponsorblocktv-rust:pi --version
+```
+
+The image inspection should print `linux/arm64`; the executable should identify
+itself as `isponsorblocktvrust`. The first build compiles Rust dependencies and
+vendored OpenSSL, so allow sufficient free disk space and memory. If compilation
+is killed for lack of memory, build on a larger ARM64 machine instead.
+
+#### Alternatively, build elsewhere and transfer the image
+
+Run the same `docker buildx build --platform linux/arm64 --load ...` command
+above on your build machine, using the full repository as its context. An ARM64
+builder runs natively; an AMD64 builder needs ARM64 execution support because
+this Dockerfile runs the ARM64 compiler and executable during the build.
+Docker Desktop normally supplies emulation; check `docker buildx inspect --bootstrap`
+for `linux/arm64` support. Emulated compilation can be slow.
+
+Export the loaded ARM64 image and copy it to the Pi. Replace `your-user@your-pi`
+with your SSH login and hostname:
+
+```sh
+docker image save -o isponsorblocktv-rust-arm64.tar isponsorblocktv-rust:pi
+scp isponsorblocktv-rust-arm64.tar your-user@your-pi:~/
+```
+
+On the Pi, import and check it:
+
+```sh
+docker image load -i "$HOME/isponsorblocktv-rust-arm64.tar"
+docker image inspect isponsorblocktv-rust:pi --format '{{.Os}}/{{.Architecture}}'
+docker run --rm --network=none isponsorblocktv-rust:pi --version
+```
+
+The transfer contains the image, not your paired-device configuration. Keep a
+checkout on the Pi for `rust/compose.yml` and future rebuilds.
+
+#### Pair and start on the Pi
+
+From the checkout's **`rust/` directory on the Pi**, run:
+
+```sh
+export ISPBTV_RUST_IMAGE=isponsorblocktv-rust:pi
+export ISPBTV_RUST_DATA_DIR="$HOME/.local/share/isponsorblocktvrust"
+mkdir -p "$ISPBTV_RUST_DATA_DIR"
+docker compose run --rm --no-deps isponsorblocktv-rust setup-cli
+docker compose up -d
+docker compose logs --tail=100 -f isponsorblocktv-rust
+```
+
+Follow [Pair and save](#pair-and-save), including the final save confirmation.
+The explicit host data directory above is your deployment choice, not a change
+to the executable's default configuration location. Back it up and preserve both
+variables in your shell or `rust/.env` for later Compose commands.
+
+Manual TV-code pairing needs no published ports or host networking. Use it first;
+LAN discovery has additional multicast requirements. Stop any other controller
+for the same TV. For later changes, follow the Docker reconfiguration and update
+steps above; rebuild the `:pi` tag and use `docker compose up -d --force-recreate`
+for a local image rather than pulling it.
+
+These commands target ARM64 Linux; successful image/version checks are not
+physical Raspberry Pi or TV-playback certification. The
+[Linux dependency security warning](README.md#dependency-security) also applies.
+
+## Pair and save
+
+1. On the TV or streaming device, open **YouTube → Settings → Link with TV code**.
+2. Leave the **12-digit TV code** visible. This is not an account sign-in or
+   activation code. Spaces and hyphens are accepted by prompt setup.
+3. Start `setup-cli` using your chosen local or Docker command above.
+4. Follow the prompts below. Pressing Enter accepts the displayed default, which
+   is **no** for both adding a device and saving.
+
+| Prompt | First-device choice |
+| --- | --- |
+| Use system-wide proxy? | `n`, unless you need a configured proxy |
+| Paired with 0 Device(s). Add more? | **`y`** |
+| Enter pairing code | The TV's 12-digit code |
+| Paired with 1 Device(s). Add more? | `n`, or `y` for another TV |
+| Add an API key? | `n` unless using the channel whitelist |
+| Enter skip categories | **`sponsor`** to skip sponsored segments |
+| Whitelist channels? | `n` for basic setup |
+| Specify a minimum segment length? | `n` to leave it unchanged |
+| Report skipped segments? | Defaults to `y`; choose `n` to disable reporting segment UUIDs to SponsorBlock |
+| Mute / skip native YouTube ads? | Choose each option; both prompts default to no |
+| Enable autoplay? | Defaults to `y`; choose your preference |
+| SponsorBlock API URL | Enter for the default service |
+| Save this configuration? | **`y`** |
+
+**Blank categories disable SponsorBlock skipping.** Enter `sponsor` if you want
+sponsor segments skipped. Existing configurations may first ask whether to change
+categories. Native YouTube ad controls are separate from SponsorBlock skipping.
+
+Successful pairing prints `Paired device: ...`; continue until the final save.
+Look for `Config saved to ...` or `Config unchanged at ...`. Pairing alone, EOF,
+or interruption does not implicitly save the draft.
+
+**When rerunning `setup-cli`, defaults are not your saved preferences.** Proxy,
+reporting, ad controls, autoplay and SponsorBlock URL prompts use fixed defaults.
+Pressing Enter through them and saving can reset earlier choices. Select each
+desired value explicitly; blank at the URL prompt selects the default service,
+not your previous custom URL.
+
+`--data` takes a **directory**, not a JSON filename. Keep configuration private:
+it contains device identifiers and may contain API keys. Do not commit it.
+
+## Verify first playback
+
+1. Stop other Python or Rust controllers for the device, then start your local
+   service or Compose container. Check for a device connection in the logs;
+   process startup or a running container alone does not prove a connection.
+2. Play a video on the paired TV with a known SponsorBlock segment in a selected
+   category. Matching community segment data must exist; not every video has it.
+3. Watch the TV confirm the skip. An accepted-seek log means YouTube accepted the
+   request, not proof that the TV completed it. If nothing happens, inspect logs
+   and the settings below before changing pairing.
+
+## Troubleshooting
+
+| Symptom | Next step |
+| --- | --- |
+| Code rejected | Check the digits; reopen the TV-code screen or restart YouTube and retry |
+| Pairing failed | Check internet/proxy connectivity; pairing needs no API key |
+| No configured devices | Answer `y` to Add more, pair successfully, and confirm the final save |
+| Config not found | Use the same data directory; local relative paths depend on your working directory |
+| Container keeps restarting | Inspect `docker compose logs`; check the mount, saved devices, and config validation errors |
+| Container runs but nothing connects | Open YouTube on the paired TV; inspect connection/retry logs and internet/proxy access |
+| GHCR pull denied or tag missing | Confirm a successful release, correct owner/tag, and package visibility/login |
+| Sponsor segments not skipped | Check categories, segment availability, minimum length, whitelist, and that the service is running |
+| TUI refuses to start | Use an interactive terminal or switch to `setup-cli` |
+| Discovery finds nothing | Pair manually; discovery needs LAN access and multicast support |
+| E0514 compiler mismatch | Follow [Recover from a mixed Rust toolchain](#recover-from-a-mixed-rust-toolchain); select one toolchain and a separate target directory |
+| Existing config fails validation | Back it up and correct it through setup; saved drafts can still be incomplete for startup |
+| Malformed JSON cannot open in setup | Restore a valid backup; setup deliberately refuses to overwrite malformed configuration |
+| Preferences change after rerunning prompt setup | Explicitly answer fixed-default prompts before saving; Enter does not always retain saved values |
+
+Review logs before sharing them; do not share TV codes, screen IDs, API keys or
+configuration files. See the [Rust README](README.md) for CI, release platforms,
+architecture and [tests and QA](README.md#tests-and-qa). Automated loopback tests
+do not replace this physical-device playback check.

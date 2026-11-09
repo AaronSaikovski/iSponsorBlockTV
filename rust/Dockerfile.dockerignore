@@ -1,0 +1,10 @@
+**
+!LICENSE.md
+!rust/
+!rust/Dockerfile
+!rust/Cargo.toml
+!rust/Cargo.lock
+!rust/rust-toolchain.toml
+!rust/THIRD_PARTY_NOTICES.md
+!rust/src/
+!rust/src/**

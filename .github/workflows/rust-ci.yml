@@ -1,0 +1,76 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-*.yml'
+      - 'LICENSE.md'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-*.yml'
+      - 'LICENSE.md'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install pinned toolchain
+        run: |
+          toolchain=$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
+              output.write(f"{cargo_home / 'bin'}\n")
+          PY
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+      - name: Build release executable
+        run: cargo build --locked --release --bin isponsorblocktvrust
+      - name: Smoke test executable
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            target/release/isponsorblocktvrust.exe --version
+          else
+            target/release/isponsorblocktvrust --version
+          fi
+
+  container:
+    name: Build Rust container (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and smoke test
+        run: |
+          docker build -f rust/Dockerfile -t isponsorblocktv-rust:ci .
+          docker run --rm --network=none isponsorblocktv-rust:ci --version
+          docker run --rm --network=none isponsorblocktv-rust:ci --help

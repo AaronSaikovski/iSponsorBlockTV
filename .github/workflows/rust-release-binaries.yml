@@ -1,0 +1,228 @@
+name: Rust release binaries
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing release tag validated by the caller
+        required: true
+        type: string
+      version:
+        description: Cargo package version validated by the caller
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            smoke: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04
+            smoke: false
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-24.04
+            smoke: false
+          - target: i686-unknown-linux-musl
+            os: ubuntu-24.04
+            smoke: false
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-24.04
+            smoke: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            smoke: true
+          - target: aarch64-apple-darwin
+            os: macos-15
+            smoke: true
+          # macos-15 is ARM; Intel macOS is compile-only, not a Rosetta smoke test.
+          - target: x86_64-apple-darwin
+            os: macos-15
+            smoke: false
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python for toolchain metadata and packaging
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Read pinned toolchain and expose Cargo binaries
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          toolchain = tomllib.loads(Path('rust/rust-toolchain.toml').read_text())['toolchain']['channel']
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'RUST_TOOLCHAIN={toolchain}\n')
+          cargo_home = Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo'))
+          with open(os.environ['GITHUB_PATH'], 'a', encoding='utf-8') as output:
+              output.write(f'{cargo_home / "bin"}\n')
+          PY
+
+      - name: Install pinned Rust compiler and target
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUST_TOOLCHAIN" "$TARGET"
+
+      - name: Set up Windows native compiler tools
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # prepare-cross.sh requires the Docker context's daemon-backed docker
+      # driver: do not select a setup-buildx docker-container builder here.
+      - name: Build Linux with the pinned cross source and local images
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+          docker buildx use default
+          if cross_exports=$(bash scripts/prepare-cross.sh "$TARGET"); then
+            eval "$cross_exports"
+          else
+            echo 'Pinned cross preparation failed; refusing to evaluate its output.' >&2
+            exit 1
+          fi
+          cross build --locked --release --target "$TARGET" --bin isponsorblocktvrust
+
+      - name: Build native Windows or macOS target
+        if: runner.os != 'Linux'
+        working-directory: rust
+        run: rustup run "$RUST_TOOLCHAIN" cargo build --locked --release --target "$TARGET" --bin isponsorblocktvrust
+
+      - name: Verify Linux ELF has no dynamic loader or dependencies
+        if: runner.os == 'Linux'
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+
+          binary = Path('rust/target') / os.environ['TARGET'] / 'release/isponsorblocktvrust'
+          details = subprocess.check_output(
+              ['readelf', '--file-header', '--program-headers', '--dynamic', '--wide', str(binary)],
+              text=True,
+          )
+          print(details)
+          if any(line.split() and line.split()[0] == 'INTERP' for line in details.splitlines()):
+              raise SystemExit('Release binary has an ELF interpreter')
+          if '(NEEDED)' in details:
+              raise SystemExit('Release binary has shared-library dependencies')
+          PY
+
+      - name: Smoke-test native executable version
+        if: matrix.smoke
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+
+          name = 'isponsorblocktvrust.exe' if os.name == 'nt' else 'isponsorblocktvrust'
+          binary = Path('rust/target') / os.environ['TARGET'] / 'release' / name
+          subprocess.run([str(binary), '--version'], check=True)
+          PY
+
+      - name: Package binary, license and third-party notices
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          target = os.environ['TARGET']
+          version = os.environ['VERSION']
+          name = 'isponsorblocktvrust.exe' if os.name == 'nt' else 'isponsorblocktvrust'
+          binary = Path('rust/target') / target / 'release' / name
+          license_file = Path('LICENSE.md')
+          notices = Path('rust/THIRD_PARTY_NOTICES.md')
+          output = Path('dist')
+          output.mkdir()
+          stem = f'isponsorblocktvrust-{version}-{target}'
+          if os.name == 'nt':
+              with zipfile.ZipFile(output / f'{stem}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+                  archive.write(binary, arcname=name)
+                  archive.write(license_file, arcname=license_file.name)
+                  archive.write(notices, arcname=notices.name)
+          else:
+              with tarfile.open(output / f'{stem}.tar.gz', 'w:gz') as archive:
+                  archive.add(binary, arcname=name)
+                  archive.add(license_file, arcname=license_file.name)
+                  archive.add(notices, arcname=notices.name)
+          PY
+
+      - name: Upload packaged target
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-release-binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Rust binary assets
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all Rust binary packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: rust-release-binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Set up Python for checksums
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Generate aggregate checksums
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          output = Path('dist')
+          assets = sorted(output.iterdir())
+          if len(assets) != 8 or not all(asset.is_file() for asset in assets):
+              raise SystemExit('Expected all eight Rust binary packages')
+          with (output / 'SHA256SUMS-rust.txt').open('w', encoding='utf-8', newline='\n') as checksums:
+              for asset in assets:
+                  with asset.open('rb') as package:
+                      digest = hashlib.file_digest(package, 'sha256').hexdigest()
+                  checksums.write(f'{digest}  {asset.name}\n')
+          PY
+
+      - name: Upload assets to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
