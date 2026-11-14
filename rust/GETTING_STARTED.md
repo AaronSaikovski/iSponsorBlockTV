@@ -333,8 +333,9 @@ the same TV at once.
 ### Raspberry Pi: build and run an ARM64 container
 
 Use an ARM64-capable Pi, such as a Raspberry Pi 4 or 5, with **64-bit Raspberry
-Pi OS** and Docker Engine, the Compose plugin, and Buildx installed. Rust is
-compiled inside the image; you do not need Cargo installed on the Pi.
+Pi OS**, Docker Engine, and the Compose plugin installed. Buildx is also required
+on whichever machine builds the image. Rust is compiled inside the image; you
+do not need Cargo installed on the Pi.
 
 Check the OS and Docker daemon architecture on the Pi:
 
@@ -343,7 +344,6 @@ uname -m
 dpkg --print-architecture
 docker info --format '{{.Architecture}}'
 docker compose version
-docker buildx version
 ```
 
 Expect `aarch64`/`arm64` and Debian architecture `arm64`. A 64-bit CPU alone is
@@ -368,57 +368,100 @@ itself as `isponsorblocktvrust`. The first build compiles Rust dependencies and
 vendored OpenSSL, so allow sufficient free disk space and memory. If compilation
 is killed for lack of memory, build on a larger ARM64 machine instead.
 
-#### Alternatively, build elsewhere and transfer the image
+#### Alternatively, build on your Mac and copy to the Pi
 
-Run the same `docker buildx build --platform linux/arm64 --load ...` command
-above on your build machine, using the full repository as its context. An ARM64
-builder runs natively; an AMD64 builder needs ARM64 execution support because
-this Dockerfile runs the ARM64 compiler and executable during the build.
-Docker Desktop normally supplies emulation; check `docker buildx inspect --bootstrap`
-for `linux/arm64` support. Emulated compilation can be slow.
-
-Export the loaded ARM64 image and copy it to the Pi. Replace `your-user@your-pi`
-with your SSH login and hostname:
+Start Docker Desktop with Linux containers. From the checkout's **`rust/`
+directory on your Mac**, build and check the ARM64 image:
 
 ```sh
-docker image save -o isponsorblocktv-rust-arm64.tar isponsorblocktv-rust:pi
-scp isponsorblocktv-rust-arm64.tar your-user@your-pi:~/
-```
-
-On the Pi, import and check it:
-
-```sh
-docker image load -i "$HOME/isponsorblocktv-rust-arm64.tar"
+docker buildx build --platform linux/arm64 --load \
+  -f Dockerfile -t isponsorblocktv-rust:pi ..
 docker image inspect isponsorblocktv-rust:pi --format '{{.Os}}/{{.Architecture}}'
 docker run --rm --network=none isponsorblocktv-rust:pi --version
 ```
 
-The transfer contains the image, not your paired-device configuration. Keep a
-checkout on the Pi for `rust/compose.yml` and future rebuilds.
+The `..` build context is required: the Dockerfile copies files from the parent
+repository. The image inspection should print `linux/arm64`. Apple Silicon
+builds ARM64 natively; an Intel/AMD64 builder needs ARM64 emulation because this
+Dockerfile runs the ARM64 compiler and executable during the build. Docker Desktop
+normally supplies emulation; check `docker buildx inspect --bootstrap` for
+`linux/arm64` support. Emulated compilation can be slow.
+
+Export the loaded image and copy it **and `compose.yml`** to the Pi. Replace
+`your-user@your-pi` with your SSH login and hostname:
+
+```sh
+docker image save -o isponsorblocktv-rust-arm64.tar isponsorblocktv-rust:pi
+ssh your-user@your-pi 'mkdir -p ~/docker/isponsorblocktv-rust'
+scp isponsorblocktv-rust-arm64.tar compose.yml \
+  your-user@your-pi:~/docker/isponsorblocktv-rust/
+```
+
+Connect to the Pi, then import and check the image:
+
+```sh
+ssh your-user@your-pi
+cd ~/docker/isponsorblocktv-rust
+docker image load -i isponsorblocktv-rust-arm64.tar
+docker image inspect isponsorblocktv-rust:pi --format '{{.Os}}/{{.Architecture}}'
+docker run --rm --network=none isponsorblocktv-rust:pi --version
+```
+
+No repository checkout is needed on the Pi when transferring the image and
+Compose file. The image does **not** contain your paired-device configuration.
 
 #### Pair and start on the Pi
 
-From the checkout's **`rust/` directory on the Pi**, run:
+Use **`~/docker/isponsorblocktv-rust`** as the deployment directory on the Pi.
+If you built directly on the Pi, first copy `compose.yml` from the checkout's
+`rust/` directory into that deployment directory:
 
 ```sh
-export ISPBTV_RUST_IMAGE=isponsorblocktv-rust:pi
-export ISPBTV_RUST_DATA_DIR="$HOME/.local/share/isponsorblocktvrust"
-mkdir -p "$ISPBTV_RUST_DATA_DIR"
+mkdir -p ~/docker/isponsorblocktv-rust
+cp compose.yml ~/docker/isponsorblocktv-rust/
+```
+
+For a new installation, persist the image and an absolute data-directory path
+in `.env`. Configuration lives in the deployment directory's `data/` subfolder:
+
+```sh
+cd ~/docker/isponsorblocktv-rust
+cat > .env <<EOF
+ISPBTV_RUST_IMAGE=isponsorblocktv-rust:pi
+ISPBTV_RUST_DATA_DIR=$HOME/docker/isponsorblocktv-rust/data
+EOF
+mkdir -p "$HOME/docker/isponsorblocktv-rust/data"
 docker compose run --rm --no-deps isponsorblocktv-rust setup-cli
+```
+
+If `.env` already exists, edit those two entries instead of overwriting it, and
+preserve your existing data-directory path. Exported shell variables override
+`.env`; unset or update older `ISPBTV_RUST_IMAGE` and `ISPBTV_RUST_DATA_DIR` values.
+
+On the TV, open **YouTube → Settings → Link with TV code**. Follow
+[Pair and save](#pair-and-save): choose **yes** to add a device, enter `sponsor`
+for categories (blank disables segment skipping), and choose **yes** at the
+final save prompt. Then start the service:
+
+```sh
 docker compose up -d
 docker compose logs --tail=100 -f isponsorblocktv-rust
 ```
 
-Follow [Pair and save](#pair-and-save), including the final save confirmation.
-The explicit host data directory above is your deployment choice, not a change
-to the executable's default configuration location. Back it up and preserve both
-variables in your shell or `rust/.env` for later Compose commands.
+Ctrl-C stops following logs, not the service. Back up the host data directory;
+it persists independently of the image and container.
 
 Manual TV-code pairing needs no published ports or host networking. Use it first;
 LAN discovery has additional multicast requirements. Stop any other controller
-for the same TV. For later changes, follow the Docker reconfiguration and update
-steps above; rebuild the `:pi` tag and use `docker compose up -d --force-recreate`
-for a local image rather than pulling it.
+for the same TV. For later configuration changes, follow the Docker
+reconfiguration steps above. To update a transferred image, repeat the build,
+export, copy, and load steps, then run from the Pi's deployment directory:
+
+```sh
+docker compose up -d --force-recreate
+```
+
+Do not pull the local-only `:pi` tag or rerun pairing for an ordinary image update.
 
 These commands target ARM64 Linux; successful image/version checks are not
 physical Raspberry Pi or TV-playback certification. The
